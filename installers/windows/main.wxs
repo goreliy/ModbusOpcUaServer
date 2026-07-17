@@ -1,14 +1,7 @@
-<?xml version="1.0" encoding="windows-1251"?>
+<?xml version="1.0" encoding="utf-8"?>
 <!--
   Каноническая сборка .msi (WiX Toolset v3). Требует установленного WiX
-  (candle.exe/light.exe) либо cargo-wix. Сборка:
-
-    candle.exe -arch x64 main.wxs
-    light.exe  -ext WixUIExtension main.wixobj -o OPC-Modbus-Server.msi
-
-  или (из корня workspace, после cargo build --release -p app -p gui):
-
-    cargo wix --no-build --nocapture
+  (candle.exe/light.exe) либо cargo-wix. Команды сборки приведены в installers/README.md.
 
   Ставит бинарники в Program Files, кладёт пример конфига в ProgramData,
   регистрирует службу opc-modbus-server (автозапуск) и ярлык конфигуратора.

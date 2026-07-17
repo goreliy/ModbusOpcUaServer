@@ -6,30 +6,26 @@
 ["trial"]` у зависимости `svc-host` в `crates/app/Cargo.toml` и
 `crates/gui/Cargo.toml` и пересобрать.
 
-## Сборка бинарников
+## Windows: готовые файлы
 
-```
-cargo build --release -p app -p gui
-# -> target/release/opc-modbus-server.exe, opc-modbus-config.exe
-```
-
-## Windows
-
-### Портируемый ZIP + PowerShell-инсталлятор (работает без доп. инструментов)
-
-`target/dist/OPC-Modbus-Server-0.1.0-trial-win64.zip` содержит оба бинарника,
-пример конфига и скрипты. Пересобрать ZIP — `scripts/pack-win.ps1` (или
-вручную Compress-Archive). Установка на целевой машине:
+Одна команда пересобирает текущий код со статическим CRT и создаёт финальные
+файлы в `dist/windows/`:
 
 ```powershell
-# распаковать zip, затем из папки:
-powershell -ExecutionPolicy Bypass -File install.ps1
+powershell -ExecutionPolicy Bypass -File scripts/pack-win.ps1
 ```
 
-`install.ps1` (сам поднимает UAC): копирует в `Program Files\OPC Modbus
-Server`, кладёт конфиг в `ProgramData\OPC Modbus Server\config.json`,
-регистрирует и запускает службу `opc-modbus-server` (автозапуск), создаёт
-ярлык конфигуратора в меню Пуск. Удаление — `uninstall.ps1`.
+В Git публикуются только два готовых файла:
+
+- `dist/windows/opc-modbus-server.exe` — сервер;
+- `dist/windows/OPC-Modbus-Server-Setup-0.1.0-trial-win64.exe` — готовый EXE-инсталлятор, внутри которого находятся сервер, GUI-конфигуратор, пример конфигурации и деинсталлятор.
+
+Установщик поднимает UAC, копирует файлы в `Program Files\OPC Modbus Server`,
+создаёт конфигурацию в `ProgramData\OPC Modbus Server`, регистрирует службу с
+автозапуском и добавляет ярлык конфигуратора.
+
+`target/`, runtime-каталоги `data/`/`pki/` и промежуточные файлы сборки в Git
+не добавляются.
 
 ### Канонический .msi (WiX Toolset)
 

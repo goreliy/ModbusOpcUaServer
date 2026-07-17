@@ -23,6 +23,9 @@
 # Logs
 *.log
 
+# Native debug symbols
+*.pdb
+
 # IDE/editor directories
 .vscode/
 .idea/

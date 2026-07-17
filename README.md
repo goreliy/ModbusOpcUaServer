@@ -12,10 +12,10 @@
 > Полный текст — [LICENSE.md](LICENSE.md).
 >
 > **Репозиторий:** https://github.com/goreliy/ModbusOpcUaServer
-> **Windows-инсталлятор:** [installers/windows/install.ps1](installers/windows/install.ps1)
-> **Готовые артефакты для публикации:** размещайте в `dist/` или другом выделенном каталоге, но не в `target/`.
+> **Готовый Windows-инсталлятор:** [`dist/windows/OPC-Modbus-Server-Setup-0.1.0-trial-win64.exe`](dist/windows/OPC-Modbus-Server-Setup-0.1.0-trial-win64.exe)
+> **Актуальный сервер:** [`dist/windows/opc-modbus-server.exe`](dist/windows/opc-modbus-server.exe)
 >
-> Локальная сборка по-прежнему выводит бинарники в `target/release/`.
+> В `target/` находятся только локальные файлы Cargo; в Git они не публикуются.
 
 ## Быстрый старт
 

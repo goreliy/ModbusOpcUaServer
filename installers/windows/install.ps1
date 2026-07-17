@@ -1,4 +1,4 @@
-# Установщик OPC Modbus Server (ПРОБНАЯ СБОРКА) для Windows.
+﻿# Установщик OPC Modbus Server (ПРОБНАЯ СБОРКА) для Windows.
 #
 # Копирует бинарники в Program Files, кладёт пример конфига в ProgramData,
 # регистрирует и запускает службу, создаёт ярлык на конфигуратор в меню Пуск
@@ -21,9 +21,9 @@ $isAdmin = ([Security.Principal.WindowsPrincipal] `
     ).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
 if (-not $isAdmin) {
     Write-Host "Требуются права администратора — перезапуск через UAC..."
-    Start-Process powershell -Verb RunAs -ArgumentList `
-        "-ExecutionPolicy Bypass -File `"$PSCommandPath`" -InstallDir `"$InstallDir`" -DataDir `"$DataDir`""
-    exit
+    $elevated = Start-Process powershell -Verb RunAs -Wait -PassThru -ArgumentList `
+        "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -InstallDir `"$InstallDir`" -DataDir `"$DataDir`""
+    exit $elevated.ExitCode
 }
 
 $src = $PSScriptRoot
