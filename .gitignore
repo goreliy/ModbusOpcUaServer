@@ -2,12 +2,21 @@
 /target/
 **/target/
 
-# Final release artifacts should be stored in a dedicated output folder
-# like dist/ or release/, not in Cargo build output directories.
+# Runtime state and generated credentials
+/data/
+/pki/
+/logs/
+
+# Local assistant/editor state
+/.claude/
+
+# Old generated Linux packages are built on demand and published as releases,
+# not stored in the source tree. Deliberate Windows deliverables live in
+# /dist/windows/ and remain visible to Git.
+/dist/linux/
+/dist/linux-arm64/
 
 # Backup files created by rustfmt and editors
-**/*.rs.bk
-*.rs.orig
 **/*.rs.bk
 *.rs.orig
 
