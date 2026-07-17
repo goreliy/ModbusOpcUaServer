@@ -12,9 +12,9 @@
 > Полный текст — [LICENSE.md](LICENSE.md).
 >
 > **Репозиторий:** https://github.com/goreliy/ModbusOpcUaServer
-> **Инсталлятор Windows:** [installers/windows/install.ps1](installers/windows/install.ps1)
-> **Серверный бинарь:** [target/release/opc-modbus-server.exe](target/release/opc-modbus-server.exe)
-> **GUI-конфигуратор:** [target/release/opc-modbus-config.exe](target/release/opc-modbus-config.exe)
+> **Windows-инсталлятор:** [installers/windows/install.ps1](installers/windows/install.ps1)
+> **Локальный путь к собранному серверу:** `target/release/opc-modbus-server.exe`
+> **Локальный путь к собранному GUI:** `target/release/opc-modbus-config.exe`
 
 ## Быстрый старт
 

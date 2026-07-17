@@ -1,6 +1,9 @@
 # Rust/Cargo build artifacts
 /target/
 **/target/
+!/target/release/
+!/target/release/opc-modbus-server.exe
+!/target/release/opc-modbus-config.exe
 
 # Backup files created by rustfmt and editors
 **/*.rs.bk
