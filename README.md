@@ -13,8 +13,9 @@
 >
 > **Репозиторий:** https://github.com/goreliy/ModbusOpcUaServer
 > **Windows-инсталлятор:** [installers/windows/install.ps1](installers/windows/install.ps1)
-> **Локальный путь к собранному серверу:** `target/release/opc-modbus-server.exe`
-> **Локальный путь к собранному GUI:** `target/release/opc-modbus-config.exe`
+> **Готовые артефакты для публикации:** размещайте в `dist/` или другом выделенном каталоге, но не в `target/`.
+>
+> Локальная сборка по-прежнему выводит бинарники в `target/release/`.
 
 ## Быстрый старт
 
