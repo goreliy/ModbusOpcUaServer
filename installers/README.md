@@ -15,9 +15,10 @@
 powershell -ExecutionPolicy Bypass -File scripts/pack-win.ps1
 ```
 
-В Git публикуются только два готовых файла:
+В Git публикуются три готовых файла:
 
 - `dist/windows/opc-modbus-server.exe` — сервер;
+- `dist/windows/opc-modbus-config.exe` — отдельный GUI-конфигуратор;
 - `dist/windows/OPC-Modbus-Server-Setup-0.1.0-trial-win64.exe` — готовый EXE-инсталлятор, внутри которого находятся сервер, GUI-конфигуратор, пример конфигурации и деинсталлятор.
 
 Установщик поднимает UAC, копирует файлы в `Program Files\OPC Modbus Server`,

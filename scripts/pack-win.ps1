@@ -1,4 +1,4 @@
-﻿# Собрать актуальный серверный EXE и самостоятельный EXE-установщик.
+﻿# Собрать актуальные серверный/GUI EXE и самостоятельный EXE-установщик.
 # Запуск из любой папки: powershell -ExecutionPolicy Bypass -File scripts/pack-win.ps1
 param(
     [string]$Version = "0.1.0-trial",
@@ -13,6 +13,7 @@ $outputDir = Join-Path $repo 'dist\windows'
 $payloadZip = Join-Path (Split-Path -Parent $workDir) "installer-payload-$Version-win64.zip"
 $installer = Join-Path $outputDir "OPC-Modbus-Server-Setup-$Version-win64.exe"
 $serverOutput = Join-Path $outputDir 'opc-modbus-server.exe'
+$configOutput = Join-Path $outputDir 'opc-modbus-config.exe'
 
 Push-Location $repo
 try {
@@ -38,6 +39,7 @@ try {
     New-Item -ItemType Directory -Force -Path $workDir, $outputDir | Out-Null
 
     Copy-Item -LiteralPath $server -Destination $serverOutput -Force
+    Copy-Item -LiteralPath $config -Destination $configOutput -Force
     Copy-Item -LiteralPath $server, $config,
         (Join-Path $repo 'config.example.json'),
         (Join-Path $repo 'README.md'),
@@ -46,9 +48,7 @@ try {
         (Join-Path $repo 'installers\windows\install.ps1'),
         (Join-Path $repo 'installers\windows\uninstall.ps1') -Destination $workDir -Force
 
-    # Remove obsolete public outputs from older packaging layouts. The GUI and
-    # payload ZIP are implementation details contained inside the installer.
-    Remove-Item -LiteralPath (Join-Path $outputDir 'opc-modbus-config.exe') -Force -ErrorAction SilentlyContinue
+    # The payload ZIP is an implementation detail contained inside the installer.
     Remove-Item -LiteralPath (Join-Path $outputDir "OPC-Modbus-Server-$Version-win64.zip") -Force -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $payloadZip) { Remove-Item -LiteralPath $payloadZip -Force }
     Compress-Archive -Path (Join-Path $workDir '*') -DestinationPath $payloadZip -CompressionLevel Optimal
@@ -72,7 +72,7 @@ try {
     Remove-Item -LiteralPath ([System.IO.Path]::ChangeExtension($installer, '.pdb')) -Force -ErrorAction SilentlyContinue
     if (-not (Test-Path -LiteralPath $installer)) { throw "Installer was not created: $installer" }
 
-    Get-FileHash -Algorithm SHA256 $serverOutput, $installer |
+    Get-FileHash -Algorithm SHA256 $serverOutput, $configOutput, $installer |
         Select-Object Path, Hash
 }
 finally {

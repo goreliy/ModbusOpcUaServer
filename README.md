@@ -14,6 +14,7 @@
 > **Репозиторий:** https://github.com/goreliy/ModbusOpcUaServer
 > **Готовый Windows-инсталлятор:** [`dist/windows/OPC-Modbus-Server-Setup-0.1.0-trial-win64.exe`](dist/windows/OPC-Modbus-Server-Setup-0.1.0-trial-win64.exe)
 > **Актуальный сервер:** [`dist/windows/opc-modbus-server.exe`](dist/windows/opc-modbus-server.exe)
+> **GUI-конфигуратор:** [`dist/windows/opc-modbus-config.exe`](dist/windows/opc-modbus-config.exe)
 >
 > В `target/` находятся только локальные файлы Cargo; в Git они не публикуются.
 
