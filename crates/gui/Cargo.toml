@@ -1,0 +1,28 @@
+[package]
+name = "gui"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "opc-modbus-config"
+path = "src/main.rs"
+
+[dependencies]
+gateway-config = { workspace = true }
+mb-types = { workspace = true }
+mb-proto = { workspace = true }
+mb-poller = { path = "../mb-poller" }
+tags-core = { path = "../tags-core" }
+opcua-gateway = { path = "../opcua-gateway" }
+svc-host = { path = "../svc-host", features = ["trial"] }
+eframe = "0.29"
+egui_plot = "0.29"
+rfd = "0.15"
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "net", "sync"] }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]

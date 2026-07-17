@@ -1,0 +1,70 @@
+[package]
+name = "app"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "OPC UA server with a built-in Modbus poller and formula engine (trial build)"
+
+[[bin]]
+name = "opc-modbus-server"
+path = "src/main.rs"
+
+[dependencies]
+gateway-config = { workspace = true }
+svc-host = { path = "../svc-host", features = ["trial"] }
+diag-log = { path = "../diag-log" }
+opcua-gateway = { path = "../opcua-gateway" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+tracing = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+
+# .deb (cargo-deb, собирается на Linux): cargo deb -p app
+# Ставит бинарь в /usr/bin, пример конфига в /etc, systemd-unit в /lib/systemd.
+[package.metadata.deb]
+name = "opc-modbus-server"
+maintainer = "OPC Modbus Server"
+copyright = "Proprietary"
+extended-description = "OPC UA сервер со встроенным опросом Modbus и движком формул (пробная сборка: 3 ч непрерывной работы)."
+depends = "$auto"
+# GUI-конфигуратор (opc-modbus-config) грузит libGL/X11/GTK/xkbcommon через
+# dlopen — автодетект их не видит. Слабая зависимость: десктоп подтянет их
+# сам, headless-сервер с `apt --no-install-recommends` останется чистым
+# (серверу opc-modbus-server графика не нужна). GTK3 тянет X11/xcb транзитивно.
+recommends = "libgtk-3-0, libgl1, libxkbcommon-x11-0"
+section = "net"
+priority = "optional"
+# cargo-deb резолвит пути от каталога крейта (crates/app): target/ он находит
+# сам (workspace target), общие файлы — через ../../ до корня workspace.
+assets = [
+    ["target/release/opc-modbus-server", "usr/bin/", "755"],
+    ["target/release/opc-modbus-config", "usr/bin/", "755"],
+    ["../../config.example.json", "etc/opc-modbus-server/config.json", "640"],
+    ["../../README.md", "usr/share/doc/opc-modbus-server/README.md", "644"],
+    ["../../LICENSE.md", "usr/share/doc/opc-modbus-server/LICENSE.md", "644"],
+]
+conf-files = ["/etc/opc-modbus-server/config.json"]
+systemd-units = { unit-name = "opc-modbus-server", unit-scripts = "../../installers/linux", enable = true, start = false }
+
+# .rpm (cargo-generate-rpm, собирается на Linux): cargo generate-rpm -p crates/app
+[package.metadata.generate-rpm]
+name = "opc-modbus-server"
+summary = "OPC UA server with a built-in Modbus poller (trial build, 3h)"
+# cargo-generate-rpm резолвит source от каталога крейта (crates/app) → ../..
+# до корня workspace для всех файлов, включая target/release.
+assets = [
+    { source = "../../target/release/opc-modbus-server", dest = "/usr/bin/opc-modbus-server", mode = "755" },
+    { source = "../../target/release/opc-modbus-config", dest = "/usr/bin/opc-modbus-config", mode = "755" },
+    { source = "../../config.example.json", dest = "/etc/opc-modbus-server/config.json", mode = "640", config = true },
+    { source = "../../installers/linux/opc-modbus-server.service", dest = "/lib/systemd/system/opc-modbus-server.service", mode = "644" },
+    { source = "../../README.md", dest = "/usr/share/doc/opc-modbus-server/README.md", mode = "644" },
+    { source = "../../LICENSE.md", dest = "/usr/share/doc/opc-modbus-server/LICENSE.md", mode = "644" },
+]
+post_install_script = "systemctl daemon-reload || true; systemctl enable opc-modbus-server || true"
+pre_uninstall_script = "systemctl disable --now opc-modbus-server || true"
+# GUI грузит libGL/GTK/xkbcommon через dlopen — слабая зависимость (dnf
+# ставит по умолчанию, серверу графика не нужна). Имена — Fedora/RHEL-стиль.
+[package.metadata.generate-rpm.recommends]
+gtk3 = "*"
+mesa-libGL = "*"
+libxkbcommon-x11 = "*"

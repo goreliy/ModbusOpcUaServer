@@ -1,0 +1,20 @@
+# Rust/Cargo build artifacts
+/target/
+**/target/
+
+# Backup files created by rustfmt and editors
+**/*.rs.bk
+*.rs.orig
+
+# Logs
+*.log
+
+# IDE/editor directories
+.vscode/
+.idea/
+*.iml
+
+# OS generated files
+.DS_Store
+Thumbs.db
+desktop.ini

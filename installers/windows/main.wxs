@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="windows-1251"?>
+<!--
+  Каноническая сборка .msi (WiX Toolset v3). Требует установленного WiX
+  (candle.exe/light.exe) либо cargo-wix. Сборка:
+
+    candle.exe -arch x64 main.wxs
+    light.exe  -ext WixUIExtension main.wixobj -o OPC-Modbus-Server.msi
+
+  или (из корня workspace, после cargo build --release -p app -p gui):
+
+    cargo wix --no-build --nocapture
+
+  Ставит бинарники в Program Files, кладёт пример конфига в ProgramData,
+  регистрирует службу opc-modbus-server (автозапуск) и ярлык конфигуратора.
+  Заранее: положите opc-modbus-server.exe / opc-modbus-config.exe /
+  config.example.json рядом (SourceDir) или поправьте пути ниже.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+  <Product Id="*"
+           Name="OPC Modbus Server (trial)"
+           Language="1049"
+           Version="0.1.0"
+           Manufacturer="OPC Modbus Server"
+           UpgradeCode="6f9d2c1a-8b4e-4c2a-9f31-2a7e5d1c0b44">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine"
+             Description="OPC UA сервер с опросом Modbus (пробная сборка, 3 ч)" />
+    <MajorUpgrade DowngradeErrorMessage="Уже установлена более новая версия." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="OPC Modbus Server">
+          <Component Id="ServerExe" Guid="1c0e9a22-3d55-4b1f-8e6a-77c2b4d90a01">
+            <File Id="serverExe" Source="opc-modbus-server.exe" KeyPath="yes" />
+            <!-- Служба Windows: SCM-запись на `service run`. -->
+            <ServiceInstall Id="SvcInstall"
+                            Name="opc-modbus-server"
+                            DisplayName="OPC Modbus Server"
+                            Description="OPC UA сервер со встроенным опросом Modbus"
+                            Type="ownProcess"
+                            Start="auto"
+                            ErrorControl="normal"
+                            Account="LocalSystem"
+                            Arguments="service run --config &quot;[CommonAppDataFolder]OPC Modbus Server\config.json&quot;" />
+            <ServiceControl Id="SvcControl"
+                            Name="opc-modbus-server"
+                            Start="install"
+                            Stop="both"
+                            Remove="uninstall"
+                            Wait="no" />
+          </Component>
+          <Component Id="ConfigExe" Guid="2d1f8b33-4e66-4c20-9f7b-88d3c5ea1b02">
+            <File Id="configExe" Source="opc-modbus-config.exe" KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+
+      <Directory Id="CommonAppDataFolder">
+        <Directory Id="DATAFOLDER" Name="OPC Modbus Server">
+          <Component Id="DefaultConfig" Guid="3e2a7c44-5f77-4d31-80ac-99e4d6fb2c03"
+                     NeverOverwrite="yes" Permanent="yes">
+            <File Id="defaultConfig" Source="config.example.json" Name="config.json" KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+
+      <Directory Id="ProgramMenuFolder">
+        <Component Id="StartMenuShortcut" Guid="4f3b6d55-6a88-4e42-91bd-aaf5e7fc3d04">
+          <Shortcut Id="ConfigShortcut"
+                    Name="Конфигуратор OPC Modbus Server"
+                    Target="[INSTALLFOLDER]opc-modbus-config.exe"
+                    WorkingDirectory="INSTALLFOLDER" />
+          <RegistryValue Root="HKCU" Key="Software\OPC Modbus Server"
+                         Name="installed" Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </Directory>
+
+    <Feature Id="Main" Title="OPC Modbus Server" Level="1">
+      <ComponentRef Id="ServerExe" />
+      <ComponentRef Id="ConfigExe" />
+      <ComponentRef Id="DefaultConfig" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+  </Product>
+</Wix>

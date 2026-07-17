@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mb-types",
+    "crates/mb-proto",
+    "crates/mb-poller",
+    "crates/tags-core",
+    "crates/config",
+    "crates/opcua-gateway",
+    "crates/mqtt-publisher",
+    "crates/diag-log",
+    "crates/svc-host",
+    "crates/gui",
+    "crates/app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Proprietary"
+publish = false
+
+[workspace.dependencies]
+mb-types = { path = "crates/mb-types" }
+gateway-config = { path = "crates/config" }
+mb-proto = { path = "crates/mb-proto" }
+bytes = "1"
+tokio-serial = "5.4"
+parking_lot = "0.12"
+dashmap = "6"
+fastrand = "2"
+argon2 = "0.5"
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"

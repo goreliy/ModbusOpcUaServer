@@ -1,0 +1,23 @@
+[package]
+name = "mb-proto"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mb-types = { workspace = true }
+gateway-config = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+tokio-serial = { workspace = true }
+# "tcp-server" kept: the phase-0 example and later simulators run an in-process server.
+tokio-modbus = { version = "0.17", default-features = false, features = ["rtu", "tcp", "tcp-server"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+# rtu-over-tcp-server: test-only — lets the RTU-over-TCP integration test run the
+# server side of the "serial tunnel" with tokio-modbus's own RTU codec over TCP.
+tokio-modbus = { version = "0.17", default-features = false, features = ["rtu-over-tcp-server"] }
+anyhow = "1"

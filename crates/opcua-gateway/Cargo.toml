@@ -1,0 +1,31 @@
+[package]
+name = "opcua-gateway"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mb-types = { workspace = true }
+gateway-config = { workspace = true }
+mb-proto = { workspace = true }
+mb-poller = { path = "../mb-poller" }
+tags-core = { path = "../tags-core" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "net"] }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+chrono = "0.4"
+argon2 = { workspace = true }
+async-trait = { workspace = true }
+log = "0.4"
+
+[dependencies.async-opcua]
+version = "0.18"
+features = ["server"]
+default-features = false
+
+[dev-dependencies]
+async-opcua = { version = "0.18", default-features = false, features = ["client"] }
+env_logger = "0.11"
+tempfile = "3"
+tokio-modbus = { version = "0.17", default-features = false, features = ["tcp", "tcp-server"] }

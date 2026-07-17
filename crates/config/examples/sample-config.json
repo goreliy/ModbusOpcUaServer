@@ -1,0 +1,168 @@
+{
+  "schema_version": "1",
+  "gateway": {
+    "instance_name": "demo-gateway",
+    "default_retry": { "max_retries": 1, "base_backoff_ms": 250, "max_backoff_ms": 10000 }
+  },
+  "opcua": {
+    "host": "0.0.0.0",
+    "port": 4840,
+    "advertised_host": "192.168.1.5"
+  },
+  "poll_groups": [
+    { "id": "fast", "period_ms": 250, "priority": 10 },
+    { "id": "slow", "period_ms": 2000 }
+  ],
+  "channels": [
+    {
+      "id": "rtu-bus-1",
+      "transport": {
+        "type": "rtu",
+        "path": "COM3",
+        "baud": 19200,
+        "data_bits": 8,
+        "parity": "even",
+        "stop_bits": 1
+      },
+      "request_timeout_ms": 500,
+      "inter_request_delay_ms": 20,
+      "max_gap": 4,
+      "devices": [
+        {
+          "id": "power-meter-1",
+          "unit_id": 1,
+          "registers": [
+            {
+              "tag": "meter1.voltage",
+              "poll_group": "fast",
+              "function": "read_holding_registers",
+              "address": 100,
+              "data_type": "f32",
+              "word_order": "little_endian",
+              "scale": 0.1
+            },
+            {
+              "tag": "meter1.current",
+              "poll_group": "fast",
+              "function": "read_holding_registers",
+              "address": 102,
+              "data_type": "f32",
+              "word_order": "little_endian",
+              "scale": 0.001
+            },
+            {
+              "tag": "meter1.status_bits",
+              "poll_group": "fast",
+              "function": "read_holding_registers",
+              "address": 110,
+              "data_type": "bitfield"
+            },
+            {
+              "tag": "meter1.serial_number",
+              "poll_group": "slow",
+              "function": "read_holding_registers",
+              "address": 200,
+              "data_type": "ascii",
+              "length": 8
+            }
+          ]
+        },
+        {
+          "id": "power-meter-2",
+          "unit_id": 2,
+          "max_gap": 0,
+          "request_timeout_ms": 750,
+          "registers": [
+            {
+              "tag": "meter2.energy_total",
+              "poll_group": "slow",
+              "function": "read_input_registers",
+              "address": 300,
+              "data_type": "u32"
+            },
+            {
+              "tag": "meter2.alarm",
+              "poll_group": "fast",
+              "function": "read_coils",
+              "address": 0,
+              "data_type": "bit"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "plc-tcp",
+      "transport": {
+        "type": "tcp",
+        "host": "192.168.1.10",
+        "port": 502
+      },
+      "retry": { "max_retries": 3, "base_backoff_ms": 500, "max_backoff_ms": 30000 },
+      "devices": [
+        {
+          "id": "plc-1",
+          "unit_id": 1,
+          "registers": [
+            {
+              "tag": "plc1.batch_counter",
+              "poll_group": "fast",
+              "function": "read_holding_registers",
+              "address": 0,
+              "data_type": "i64"
+            },
+            {
+              "tag": "plc1.temperature",
+              "poll_group": "fast",
+              "function": "read_input_registers",
+              "address": 20,
+              "data_type": "i16",
+              "scale": 0.01,
+              "offset": -40.0
+            },
+            {
+              "tag": "plc1.running",
+              "poll_group": "fast",
+              "function": "read_discrete_inputs",
+              "address": 5,
+              "data_type": "bit"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "remote-rtu-gateway",
+      "transport": {
+        "type": "rtu_over_tcp",
+        "host": "10.0.0.7",
+        "port": 4001
+      },
+      "request_timeout_ms": 1500,
+      "devices": [
+        {
+          "id": "vendor-controller",
+          "unit_id": 17,
+          "registers": [
+            {
+              "tag": "vendor.diag_block",
+              "poll_group": "slow",
+              "function": { "custom": { "code": 65 } },
+              "address": 0,
+              "data_type": "u16",
+              "custom_request": "01 a0",
+              "custom_response_len": 16
+            },
+            {
+              "tag": "vendor.fw_version",
+              "poll_group": "slow",
+              "function": "read_holding_registers",
+              "address": 1,
+              "data_type": "u16"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

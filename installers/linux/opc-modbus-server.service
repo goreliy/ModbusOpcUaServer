@@ -1,0 +1,18 @@
+[Unit]
+Description=OPC Modbus Server (OPC UA server with a built-in Modbus poller)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/opc-modbus-server run --config /etc/opc-modbus-server/config.json
+WorkingDirectory=/var/lib/opc-modbus-server
+Restart=on-failure
+RestartSec=5
+SupplementaryGroups=dialout
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,25 @@
+[package]
+name = "svc-host"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[features]
+# Пробная сборка: сервер останавливается после 3 часов непрерывной работы.
+trial = []
+
+[dependencies]
+gateway-config = { workspace = true }
+mb-poller = { path = "../mb-poller" }
+tags-core = { path = "../tags-core" }
+opcua-gateway = { path = "../opcua-gateway" }
+diag-log = { path = "../diag-log" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync"] }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
