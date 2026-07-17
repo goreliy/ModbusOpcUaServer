@@ -1,10 +1,18 @@
 # Rust/Cargo build artifacts
-/target/*
-**/target/*
+/target/
+**/target/
+
+# Allow only final release executables from target/release
 !/target/release/
+/target/release/*
 !/target/release/opc-modbus-server.exe
 !/target/release/opc-modbus-config.exe
+
+# Allow only final distributables in target/dist
 !/target/dist/
+/target/dist/*
+!/target/dist/*.zip
+!/target/dist/*.msi
 
 # Backup files created by rustfmt and editors
 **/*.rs.bk
