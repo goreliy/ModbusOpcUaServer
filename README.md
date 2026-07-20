@@ -12,11 +12,18 @@
 > Полный текст — [LICENSE.md](LICENSE.md).
 >
 > **Репозиторий:** https://github.com/goreliy/ModbusOpcUaServer
-> **Готовый Windows-инсталлятор:** [`dist/windows/OPC-Modbus-Server-Setup-0.1.0-trial-win64.exe`](dist/windows/OPC-Modbus-Server-Setup-0.1.0-trial-win64.exe)
-> **Актуальный сервер:** [`dist/windows/opc-modbus-server.exe`](dist/windows/opc-modbus-server.exe)
-> **GUI-конфигуратор:** [`dist/windows/opc-modbus-config.exe`](dist/windows/opc-modbus-config.exe)
->
-> В `target/` находятся только локальные файлы Cargo; в Git они не публикуются.
+
+## Скачать (Windows x64, пробная сборка — 3 ч)
+
+| Файл | Что это |
+|---|---|
+| [**OPC-Modbus-Server-Setup-0.1.0-trial-win64.exe**](https://github.com/goreliy/ModbusOpcUaServer/raw/main/dist/windows/OPC-Modbus-Server-Setup-0.1.0-trial-win64.exe) | Инсталлятор: ставит сервер как службу Windows (автозапуск), кладёт конфиг в `ProgramData`, создаёт ярлык конфигуратора в меню Пуск |
+| [opc-modbus-server.exe](https://github.com/goreliy/ModbusOpcUaServer/raw/main/dist/windows/opc-modbus-server.exe) | Портативный сервер — работает без установки: `opc-modbus-server run --config config.json` |
+| [opc-modbus-config.exe](https://github.com/goreliy/ModbusOpcUaServer/raw/main/dist/windows/opc-modbus-config.exe) | Портативный GUI-конфигуратор: редактор конфига, пробное чтение Modbus, запуск сервера из окна, графики тегов |
+
+EXE статические (static CRT) — дополнительных runtime-библиотек не нужно.
+Linux-пакеты (`.deb` / `.rpm` / `.tar.gz`, x86_64 и arm64) собираются одной
+командой в Docker — см. [installers/README.md](installers/README.md).
 
 ## Быстрый старт
 

@@ -1,37 +1,38 @@
-# Rust/Cargo build artifacts
+# --- Rust / Cargo ---
+# Build artifacts (workspace root and any nested crate).
 /target/
 **/target/
+# rustfmt / merge backups.
+**/*.rs.bk
+*.rs.orig
+# Native debug symbols.
+*.pdb
+# Cargo.lock IS committed on purpose: this workspace ships binaries, and a
+# locked dependency graph keeps builds reproducible.
 
-# Runtime state and generated credentials
+# --- Runtime state the server creates next to its config ---
 /data/
-/pki/
 /logs/
+/pki/
+*.log
 
-# Local assistant/editor state
-/.claude/
-
-# Old generated Linux packages are built on demand and published as releases,
-# not stored in the source tree. Deliberate Windows deliverables live in
-# /dist/windows/ and remain visible to Git.
+# --- Generated distribution packages ---
+# Linux packages are rebuilt on demand (installers/linux/*.sh, see
+# installers/README.md) and belong in GitHub Releases, not in the tree.
+# The Windows deliverables in /dist/windows/ ARE committed deliberately —
+# the README download links point straight at them.
 /dist/linux/
 /dist/linux-arm64/
 
-# Backup files created by rustfmt and editors
-**/*.rs.bk
-*.rs.orig
-
-# Logs
-*.log
-
-# Native debug symbols
-*.pdb
-
-# IDE/editor directories
+# --- IDE / editors ---
 .vscode/
 .idea/
 *.iml
 
-# OS generated files
+# --- Local assistant state ---
+/.claude/
+
+# --- OS junk ---
 .DS_Store
 Thumbs.db
 desktop.ini
