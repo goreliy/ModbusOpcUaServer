@@ -3,9 +3,8 @@
 //!
 //! - `raw` — the decoded numeric value (f64) of THIS tag's register;
 //! - `tag("other.name")` — read-at-eval access to another tag's CURRENT
-//!   typed value (no recompute cascade: the value is whatever the engine
-//!   last published for that tag; Bad/Absent reads evaluate to an error and
-//!   the update degrades quality instead of publishing garbage);
+//!   calculated value; the engine evaluates dependencies in topological order,
+//!   before applying publication deadbands.
 //! - the full evalexpr builtin set (math, comparisons, if, min/max, ...).
 //!
 //! The inverse (`write_formula`) receives `value` (the engineering value an
@@ -15,7 +14,7 @@ use std::sync::Arc;
 
 use evalexpr::{
     build_operator_tree, ContextWithMutableFunctions, ContextWithMutableVariables, EvalexprError,
-    Function, HashMapContext, Node, Value,
+    Function, HashMapContext, Node, Operator, Value,
 };
 
 use crate::value::TypedValue;
@@ -28,6 +27,47 @@ pub enum FormulaError {
     NotNumeric(String),
     #[error("input value is not numeric")]
     NonNumericInput,
+    #[error("formula result is not finite")]
+    NonFinite,
+    #[error("{0}")]
+    Invalid(String),
+}
+
+/// Static dependencies extracted from the parsed expression, not text matching.
+/// Dynamic names are deliberately rejected: a dependency graph must be known
+/// before a configuration can be activated.
+pub fn dependencies(text: &str) -> Result<Vec<String>, FormulaError> {
+    fn walk(node: &Node, out: &mut Vec<String>) -> Result<(), FormulaError> {
+        if matches!(node.operator(), Operator::FunctionIdentifier { identifier } if identifier == "tag")
+        {
+            let mut arg = node
+                .children()
+                .first()
+                .ok_or_else(|| FormulaError::Invalid("tag() requires a literal name".into()))?;
+            while matches!(arg.operator(), Operator::RootNode) && arg.children().len() == 1 {
+                arg = &arg.children()[0];
+            }
+            match arg.operator() {
+                Operator::Const {
+                    value: Value::String(name),
+                } => out.push(name.clone()),
+                _ => {
+                    return Err(FormulaError::Invalid(
+                        "tag() requires a literal string name".into(),
+                    ))
+                }
+            }
+        }
+        for child in node.children() {
+            walk(child, out)?;
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    walk(&build_operator_tree(text)?, &mut out)?;
+    out.sort();
+    out.dedup();
+    Ok(out)
 }
 
 /// Read-at-eval provider for `tag("name")`. Implemented by the typed store.
@@ -67,20 +107,42 @@ impl Formula {
         var_name: &str,
         lookup: Option<Arc<dyn TagLookup>>,
     ) -> Result<Self, FormulaError> {
+        let deps = dependencies(text)?;
+        if var_name == "value" && !deps.is_empty() {
+            return Err(FormulaError::Invalid(
+                "write_formula cannot call tag(); use value".into(),
+            ));
+        }
         let f = Self {
             node: build_operator_tree(text)?,
             text: text.to_string(),
             lookup,
         };
         // Trial eval with a stub lookup (the real store is empty at boot).
-        f.eval_with(var_name, 0.0, Some(&(Arc::new(ProbeLookup) as Arc<dyn TagLookup>)))?;
+        f.eval_with(
+            var_name,
+            0.0,
+            Some(&(Arc::new(ProbeLookup) as Arc<dyn TagLookup>)),
+        )?;
+        if f.node.iter_write_variable_identifiers().next().is_some() {
+            return Err(FormulaError::Invalid(
+                "assignments are not allowed in formulas".into(),
+            ));
+        }
         Ok(f)
     }
 
     /// Evaluate with `input` bound to `var_name` ("raw" for reads, "value"
     /// for the write inverse). Returns the numeric result.
     pub fn eval(&self, var_name: &str, input: f64) -> Result<f64, FormulaError> {
-        self.eval_with(var_name, input, self.lookup.as_ref())
+        if !input.is_finite() {
+            return Err(FormulaError::NonFinite);
+        }
+        let out = self.eval_with(var_name, input, self.lookup.as_ref())?;
+        if !out.is_finite() {
+            return Err(FormulaError::NonFinite);
+        }
+        Ok(out)
     }
 
     fn eval_with(
@@ -131,8 +193,9 @@ pub fn check_config_formulas<'a, I>(entries: I) -> Vec<String>
 where
     I: IntoIterator<Item = (&'a str, Option<&'a str>, Option<&'a str>)>,
 {
+    let entries: Vec<_> = entries.into_iter().collect();
     let mut problems = Vec::new();
-    for (tag, formula, write_formula) in entries {
+    for &(tag, formula, write_formula) in &entries {
         if let Some(text) = formula {
             if let Err(e) = Formula::compile(text, "raw", None) {
                 problems.push(format!("tag `{tag}`: formula: {e}"));
@@ -142,6 +205,13 @@ where
             if let Err(e) = Formula::compile(text, "value", None) {
                 problems.push(format!("tag `{tag}`: write_formula: {e}"));
             }
+        }
+    }
+    if problems.is_empty() {
+        if let Err(e) = crate::graph::DependencyGraph::build(
+            entries.iter().map(|(name, formula, _)| (*name, *formula)),
+        ) {
+            problems.push(e);
         }
     }
     problems
@@ -156,6 +226,12 @@ pub enum Transform {
 }
 
 impl Transform {
+    pub fn uses_raw(&self) -> bool {
+        match self {
+            Self::Linear { .. } => true,
+            Self::Expr(f) => f.node.iter_read_variable_identifiers().any(|v| v == "raw"),
+        }
+    }
     /// Build from the resolved register metadata. `formula` wins over
     /// scale/offset (validation warns about shadowing).
     pub fn from_meta(
@@ -216,23 +292,39 @@ mod tests {
         assert!(id.is_identity());
         // Identity keeps the native type (a u16 status stays UInt).
         assert_eq!(id.apply(TypedValue::UInt(7)).unwrap(), TypedValue::UInt(7));
-        assert_eq!(id.apply(TypedValue::Bool(true)).unwrap(), TypedValue::Bool(true));
+        assert_eq!(
+            id.apply(TypedValue::Bool(true)).unwrap(),
+            TypedValue::Bool(true)
+        );
     }
 
     #[test]
     fn expression_formula_evaluates_with_raw() {
         let t = Transform::from_meta(Some("raw * 60"), 1.0, 0.0, None).unwrap();
-        assert_eq!(t.apply(TypedValue::Float(2.5)).unwrap(), TypedValue::Float(150.0));
+        assert_eq!(
+            t.apply(TypedValue::Float(2.5)).unwrap(),
+            TypedValue::Float(150.0)
+        );
 
         // Booleans coerce to 0/1 as input; int results come back as Float.
         let t = Transform::from_meta(Some("if(raw > 100, 1, 0)"), 1.0, 0.0, None).unwrap();
-        assert_eq!(t.apply(TypedValue::UInt(150)).unwrap(), TypedValue::Float(1.0));
+        assert_eq!(
+            t.apply(TypedValue::UInt(150)).unwrap(),
+            TypedValue::Float(1.0)
+        );
     }
 
     #[test]
     fn parse_errors_fail_at_compile_time() {
         // evalexpr's parser is lenient — the probe eval catches these anyway.
-        for bad in ["raw + ", "(raw", "raw raw", "raw +* 2", "unknown_var * 2", "nosuchfn(raw)"] {
+        for bad in [
+            "raw + ",
+            "(raw",
+            "raw raw",
+            "raw +* 2",
+            "unknown_var * 2",
+            "nosuchfn(raw)",
+        ] {
             assert!(
                 Formula::compile(bad, "raw", None).is_err(),
                 "{bad:?} must fail at compile/probe"
@@ -264,10 +356,17 @@ mod tests {
     #[test]
     fn cross_tag_access_reads_current_values() {
         let lookup: Arc<dyn TagLookup> = Arc::new(FakeLookup);
-        let t =
-            Transform::from_meta(Some(r#"raw + tag("phase.a") + tag("phase.b")"#, ), 1.0, 0.0, Some(lookup))
-                .unwrap();
-        assert_eq!(t.apply(TypedValue::Float(5.0)).unwrap(), TypedValue::Float(35.0));
+        let t = Transform::from_meta(
+            Some(r#"raw + tag("phase.a") + tag("phase.b")"#),
+            1.0,
+            0.0,
+            Some(lookup),
+        )
+        .unwrap();
+        assert_eq!(
+            t.apply(TypedValue::Float(5.0)).unwrap(),
+            TypedValue::Float(35.0)
+        );
     }
 
     #[test]
@@ -318,7 +417,12 @@ mod tests {
     fn check_config_formulas_reports_each_broken_formula_with_its_tag() {
         let problems = check_config_formulas([
             // Clean: both sides compile (incl. tag() cross-references).
-            ("speed", Some(r#"raw * 60 + tag("phase.a")"#), Some("value / 60")),
+            (
+                "speed",
+                Some(r#"raw * 60 + tag("phase.a")"#),
+                Some("value / 60"),
+            ),
+            ("phase.a", None, None),
             // No formulas at all: nothing to check.
             ("plain", None, None),
             // Broken read formula ("raw +" only fails at the probe eval).

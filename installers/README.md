@@ -1,10 +1,10 @@
 # Дистрибутивы и инсталляторы
 
-**ПРОБНАЯ СБОРКА.** Бинарники собираются с feature `trial`: сервер работает
-непрерывно не более **3 часов**, затем корректно останавливается (в консоли,
-службе и встроенном сервере GUI). Для полной сборки — убрать `features =
-["trial"]` у зависимости `svc-host` в `crates/app/Cargo.toml` и
-`crates/gui/Cargo.toml` и пересобрать.
+По умолчанию собирается **полная версия без ограничения времени работы**.
+Пробная версия включается явно: `--features app/trial,gui/trial` у Cargo
+или `-Trial` у Windows-упаковщика. Она останавливается после 3 часов.
+Тип готовой сборки проверяется командами `opc-modbus-server build-info` и
+`opc-modbus-config --build-info`; JSON содержит `trial` и `runtime_limit_seconds`.
 
 ## Windows: готовые файлы
 
@@ -19,7 +19,8 @@ powershell -ExecutionPolicy Bypass -File scripts/pack-win.ps1
 
 - `dist/windows/opc-modbus-server.exe` — сервер;
 - `dist/windows/opc-modbus-config.exe` — отдельный GUI-конфигуратор;
-- `dist/windows/OPC-Modbus-Server-Setup-0.1.0-trial-win64.exe` — готовый EXE-инсталлятор, внутри которого находятся сервер, GUI-конфигуратор, пример конфигурации и деинсталлятор.
+- `dist/windows/OPC-Modbus-Server-Setup-0.1.0-full-win64.exe` — готовый EXE-инсталлятор, внутри которого находятся сервер, GUI-конфигуратор, пример конфигурации и деинсталлятор.
+- `dist/windows/build-info.json` — проверенный тип сборки и SHA256 бинарников.
 
 Установщик поднимает UAC, копирует файлы в `Program Files\OPC Modbus Server`,
 создаёт конфигурацию в `ProgramData\OPC Modbus Server`, регистрирует службу с
@@ -65,8 +66,8 @@ MSYS_NO_PATHCONV=1 docker run --rm \
 Собрано на glibc **2.36** (Debian 12). Для более старых систем поднимите базовый
 образ на `rust:1.90-bullseye` (glibc 2.31) в скрипте.
 
-Проверено: установка `.deb` в чистый `debian:12-slim`, `validate` и `run`
-работают, trial-лимит активен.
+Ранее проверена установка пробного `.deb` в чистый `debian:12-slim`:
+`validate` и `run` работают. Эта историческая проверка выполнялась с trial-лимитом.
 
 ### Linux arm64 (aarch64) — Astra/Debian/Ubuntu на ARM
 

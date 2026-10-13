@@ -12,7 +12,19 @@ pub mod stack;
 #[cfg(windows)]
 pub mod windows;
 
-pub use stack::{run_stack, start_stack, RunningStack, StackExit};
+pub use stack::{run_stack, run_stack_watched, start_stack, RunningStack, StackExit};
+
+/// Read the actual linked runtime's build type without starting any services.
+pub fn build_info() -> serde_json::Value {
+    serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "trial": stack::TRIAL_LIMIT.is_some(),
+        "runtime_limit_seconds": stack::TRIAL_LIMIT.map(|d| d.as_secs()),
+        "debug_assertions": cfg!(debug_assertions),
+        "arch": std::env::consts::ARCH,
+        "os": std::env::consts::OS,
+    })
+}
 
 /// The systemd unit for the server. `exe` and `config` must be absolute.
 pub fn systemd_unit(exe: &std::path::Path, config: &std::path::Path) -> String {

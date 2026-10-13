@@ -14,6 +14,10 @@ mod testpoll;
 use eframe::egui;
 
 fn main() -> eframe::Result {
+    if std::env::args().any(|arg| arg == "--build-info") {
+        println!("{}", svc_host::build_info());
+        return Ok(());
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 820.0])

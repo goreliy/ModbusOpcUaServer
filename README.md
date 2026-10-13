@@ -13,13 +13,17 @@
 >
 > **Репозиторий:** https://github.com/goreliy/ModbusOpcUaServer
 
-## Скачать (Windows x64, пробная сборка — 3 ч)
+## Скачать (Windows x64, полная сборка без ограничения времени работы)
 
 | Файл | Что это |
 |---|---|
-| [**OPC-Modbus-Server-Setup-0.1.0-trial-win64.exe**](https://github.com/goreliy/ModbusOpcUaServer/raw/main/dist/windows/OPC-Modbus-Server-Setup-0.1.0-trial-win64.exe) | Инсталлятор: ставит сервер как службу Windows (автозапуск), кладёт конфиг в `ProgramData`, создаёт ярлык конфигуратора в меню Пуск |
-| [opc-modbus-server.exe](https://github.com/goreliy/ModbusOpcUaServer/raw/main/dist/windows/opc-modbus-server.exe) | Портативный сервер — работает без установки: `opc-modbus-server run --config config.json` |
-| [opc-modbus-config.exe](https://github.com/goreliy/ModbusOpcUaServer/raw/main/dist/windows/opc-modbus-config.exe) | Портативный GUI-конфигуратор: редактор конфига, пробное чтение Modbus, запуск сервера из окна, графики тегов |
+| [**OPC-Modbus-Server-Setup-0.1.0-full-win64.exe**](dist/windows/OPC-Modbus-Server-Setup-0.1.0-full-win64.exe) | Инсталлятор: ставит сервер как службу Windows (автозапуск), кладёт конфиг в `ProgramData`, создаёт ярлык конфигуратора в меню Пуск |
+| [opc-modbus-server.exe](dist/windows/opc-modbus-server.exe) | Портативный сервер — работает без установки: `opc-modbus-server run --config config.json` |
+| [opc-modbus-config.exe](dist/windows/opc-modbus-config.exe) | Портативный GUI-конфигуратор: редактор конфига, пробное чтение Modbus, запуск сервера из окна, графики тегов |
+
+Обычная сборка `cargo build --release -p app -p gui` не имеет лимита времени.
+Trial включается только явно: `--features app/trial,gui/trial`. Сведения о
+готовых EXE: `opc-modbus-server build-info`, `opc-modbus-config --build-info`.
 
 EXE статические (static CRT) — дополнительных runtime-библиотек не нужно.
 Linux-пакеты (`.deb` / `.rpm` / `.tar.gz`, x86_64 и arm64) собираются одной
@@ -90,6 +94,22 @@ sudo systemctl daemon-reload && sudo systemctl enable --now opc-modbus-server
 многословных типов). Необязательное поле `write_function` форсит конкретный
 код, когда устройство этого требует — например `write_multiple_coils` (FC15)
 для катушки или `write_multiple_registers` (FC16) для одиночного регистра.
+
+Конфигурация тегов и опроса **подгружается без перезапуска процесса**: после
+сохранения JSON консольный сервер и служба проверяют его раз в 250 мс и
+применяют после двух одинаковых чтений. GUI применяет сохранение к встроенному
+серверу и проверяет внешние изменения при обновлении окна. Ошибочная версия
+отклоняется, действующая продолжает работать. При смене плана опроса Modbus
+задачи переподключаются; OPC UA сессии и подписки сохраняются. Изменение только
+формул не переподключает Modbus. Endpoint/security/PKI OPC UA, logging и
+data_dir — настройки запуска, их изменение на ходу отклоняется.
+
+Формулы образуют граф: изменение `a` пересчитывает все зависящие от него теги
+по цепочке `a → b → c`. `tag("имя")` читает последнее вычисленное значение
+до deadband; циклы, неизвестные и динамически вычисляемые имена запрещены.
+Формула без `raw` использует только свои зависимости. NaN/Infinity и ошибки
+дают Bad с сохранением последнего значения; качество источников распространяется
+по графу. `write_formula` принимает `value`, без `tag()`.
 
 Относительные пути (`data_dir`, `logging.dir`, `opcua.pki_dir`) отсчитываются
 от каталога конфиг-файла, а не от текущего каталога процесса — служба и

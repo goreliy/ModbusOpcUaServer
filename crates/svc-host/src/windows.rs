@@ -25,8 +25,7 @@ use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
 pub const SERVICE_NAME: &str = "opc-modbus-server";
 const DISPLAY_NAME: &str = "OPC Modbus Server";
-const DESCRIPTION: &str =
-    "OPC UA server with a built-in Modbus poller and formula engine";
+const DESCRIPTION: &str = "OPC UA server with a built-in Modbus poller and formula engine";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServiceError {
@@ -68,8 +67,7 @@ pub fn install(exe: &Path, config: &Path) -> Result<(), ServiceError> {
 
 /// Remove the SCM entry (stops it first when running).
 pub fn uninstall() -> Result<(), ServiceError> {
-    let manager =
-        ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
     let service = manager.open_service(
         SERVICE_NAME,
         ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE,
@@ -129,8 +127,8 @@ fn service_main_inner() -> Result<(), ServiceError> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let mut shutdown_tx = Some(shutdown_tx);
 
-    let status_handle = service_control_handler::register(SERVICE_NAME, move |control| {
-        match control {
+    let status_handle =
+        service_control_handler::register(SERVICE_NAME, move |control| match control {
             ServiceControl::Stop | ServiceControl::Shutdown => {
                 if let Some(tx) = shutdown_tx.take() {
                     let _ = tx.send(());
@@ -139,8 +137,7 @@ fn service_main_inner() -> Result<(), ServiceError> {
             }
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
             _ => ServiceControlHandlerResult::NotImplemented,
-        }
-    })?;
+        })?;
 
     let running = ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,
@@ -157,7 +154,7 @@ fn service_main_inner() -> Result<(), ServiceError> {
         .enable_all()
         .build()
         .map_err(|e| ServiceError::Other(format!("tokio runtime: {e}")))?;
-    let exit = runtime.block_on(crate::run_stack(cfg, async move {
+    let exit = runtime.block_on(crate::run_stack_watched(cfg, config, async move {
         let _ = shutdown_rx.await;
     }));
 

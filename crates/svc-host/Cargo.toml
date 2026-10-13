@@ -17,9 +17,13 @@ diag-log = { path = "../diag-log" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync"] }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+serde_json = { workspace = true }
+mb-types = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+async-opcua = { version = "0.18", default-features = false, features = ["client"] }
+tokio-modbus = { version = "0.17", default-features = false, features = ["tcp", "tcp-server"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"

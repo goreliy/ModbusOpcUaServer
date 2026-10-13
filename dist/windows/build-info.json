@@ -1,0 +1,23 @@
+﻿{
+    "package_version":  "0.1.0-full",
+    "server":  {
+                   "arch":  "x86_64",
+                   "debug_assertions":  false,
+                   "os":  "windows",
+                   "runtime_limit_seconds":  null,
+                   "trial":  false,
+                   "version":  "0.1.0"
+               },
+    "configurator":  {
+                         "arch":  "x86_64",
+                         "debug_assertions":  false,
+                         "os":  "windows",
+                         "runtime_limit_seconds":  null,
+                         "trial":  false,
+                         "version":  "0.1.0"
+                     },
+    "sha256":  {
+                   "server":  "436DE23E3332F4B64BCC09AAE87C30A68134A336D2A65618D52E4BF4D6734A37",
+                   "configurator":  "1C437B62BF9D4D4BB20EC196D433C1894C049E3057B38A6D216256BA8EB958C3"
+               }
+}

@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "OPC UA server with a built-in Modbus poller and formula engine (trial build)"
+description = "OPC UA server with a built-in Modbus poller and formula engine"
+
+[features]
+default = []
+trial = ["svc-host/trial"]
 
 [[bin]]
 name = "opc-modbus-server"
@@ -12,7 +16,8 @@ path = "src/main.rs"
 
 [dependencies]
 gateway-config = { workspace = true }
-svc-host = { path = "../svc-host", features = ["trial"] }
+tags-core = { path = "../tags-core" }
+svc-host = { path = "../svc-host" }
 diag-log = { path = "../diag-log" }
 opcua-gateway = { path = "../opcua-gateway" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
@@ -25,7 +30,7 @@ clap = { version = "4", features = ["derive"] }
 name = "opc-modbus-server"
 maintainer = "OPC Modbus Server"
 copyright = "Proprietary"
-extended-description = "OPC UA сервер со встроенным опросом Modbus и движком формул (пробная сборка: 3 ч непрерывной работы)."
+extended-description = "OPC UA сервер со встроенным опросом Modbus и движком формул."
 depends = "$auto"
 # GUI-конфигуратор (opc-modbus-config) грузит libGL/X11/GTK/xkbcommon через
 # dlopen — автодетект их не видит. Слабая зависимость: десктоп подтянет их
@@ -49,7 +54,7 @@ systemd-units = { unit-name = "opc-modbus-server", unit-scripts = "../../install
 # .rpm (cargo-generate-rpm, собирается на Linux): cargo generate-rpm -p crates/app
 [package.metadata.generate-rpm]
 name = "opc-modbus-server"
-summary = "OPC UA server with a built-in Modbus poller (trial build, 3h)"
+summary = "OPC UA server with a built-in Modbus poller"
 # cargo-generate-rpm резолвит source от каталога крейта (crates/app) → ../..
 # до корня workspace для всех файлов, включая target/release.
 assets = [

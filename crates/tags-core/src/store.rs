@@ -128,8 +128,33 @@ impl TypedStore {
         self.slots.is_empty()
     }
 
+    /// Copy a compatible last published value into a prepared generation.
+    pub fn seed(&self, tag: TagId, snapshot: TypedSnapshot) {
+        if let Some(slot) = self.slots.get(tag.0 as usize) {
+            *slot.inner.write() = snapshot;
+        }
+    }
+
+    pub fn clear(&self, tag: TagId) {
+        if let Some(slot) = self.slots.get(tag.0 as usize) {
+            *slot.inner.write() = TypedSnapshot {
+                value: TypedValue::Absent,
+                quality: Quality::Bad,
+                source_ts: SystemTime::UNIX_EPOCH,
+                mono: Instant::now(),
+                seq: 0,
+            };
+        }
+    }
+
     /// Write a computed value; bumps `seq`, refreshes timestamps, Good.
-    pub(crate) fn publish_value(&self, tag: TagId, value: TypedValue, ts: SystemTime, mono: Instant) {
+    pub(crate) fn publish_value(
+        &self,
+        tag: TagId,
+        value: TypedValue,
+        ts: SystemTime,
+        mono: Instant,
+    ) {
         if let Some(slot) = self.slots.get(tag.0 as usize) {
             let mut g = slot.inner.write();
             g.value = value;
@@ -172,7 +197,9 @@ impl TypedStore {
 
 impl TypedReader for TypedStore {
     fn snapshot(&self, tag: TagId) -> Option<TypedSnapshot> {
-        self.slots.get(tag.0 as usize).map(|s| s.inner.read().clone())
+        self.slots
+            .get(tag.0 as usize)
+            .map(|s| s.inner.read().clone())
     }
 
     fn resolve(&self, name: &str) -> Option<TagId> {
@@ -269,10 +296,20 @@ mod tests {
         // TagLookup: Uncertain restored value must NOT feed formulas...
         assert_eq!(store.numeric_value("r"), None);
         // ...but a Good published one does.
-        store.publish_value(TagId(1), TypedValue::UInt(7), SystemTime::now(), Instant::now());
+        store.publish_value(
+            TagId(1),
+            TypedValue::UInt(7),
+            SystemTime::now(),
+            Instant::now(),
+        );
         assert_eq!(store.numeric_value("g"), Some(7.0));
         // Text is non-numeric even when Good.
-        store.publish_value(TagId(1), TypedValue::Text("s".into()), SystemTime::now(), Instant::now());
+        store.publish_value(
+            TagId(1),
+            TypedValue::Text("s".into()),
+            SystemTime::now(),
+            Instant::now(),
+        );
         assert_eq!(store.numeric_value("g"), None);
     }
 }

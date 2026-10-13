@@ -31,6 +31,8 @@ pub enum ConfigError {
 
     #[error("duplicate {kind} id `{id}`")]
     DuplicateId { kind: &'static str, id: String },
+    #[error("tag `{tag}` collides with an OPC UA device folder NodeId")]
+    TagFolderCollision { tag: String },
 
     #[error("tag `{tag}`: unknown poll_group `{group}`")]
     UnknownPollGroup { tag: String, group: String },
@@ -198,7 +200,13 @@ fn format_list(errs: &[ConfigError]) -> String {
 pub fn load(path: impl AsRef<Path>) -> Result<ResolvedConfig, ConfigError> {
     let path = path.as_ref();
     let text = std::fs::read_to_string(path)?;
-    let mut rc = load_str(&text)?;
+    load_str_at(&text, path)
+}
+
+/// Load an already-read stable snapshot with paths anchored to its filename.
+pub fn load_str_at(text: &str, path: impl AsRef<Path>) -> Result<ResolvedConfig, ConfigError> {
+    let path = path.as_ref();
+    let mut rc = load_str(text)?;
     if let Some(base) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         rebase_onto(base, &mut rc.gateway.data_dir);
         if let Some(dir) = rc.logging.dir.as_mut() {
@@ -242,7 +250,12 @@ pub(crate) mod test_util {
         }
     }
 
-    pub fn entry(tag: &str, function: FunctionCode, address: u16, data_type: DataType) -> RegisterEntry {
+    pub fn entry(
+        tag: &str,
+        function: FunctionCode,
+        address: u16,
+        data_type: DataType,
+    ) -> RegisterEntry {
         RegisterEntry {
             tag: tag.into(),
             poll_group: "fast".into(),
@@ -361,6 +374,25 @@ mod tests {
     use mb_types::{DataType as DT, FunctionCode as FC};
 
     #[test]
+    fn reject_tag_name_that_would_replace_a_device_folder() {
+        let c = cfg(
+            vec![pg("fast", 100)],
+            vec![tcp_channel(
+                "c",
+                vec![device(
+                    "d",
+                    1,
+                    vec![entry("dev:d", FC::ReadHoldingRegisters, 0, DT::U16)],
+                )],
+            )],
+        );
+        let errors = validate::validate(&c);
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ConfigError::TagFolderCollision { .. })));
+    }
+
+    #[test]
     fn load_str_happy_path() {
         let json = r#"{
             "schema_version": "1",
@@ -435,8 +467,12 @@ mod tests {
         match load_str(&json) {
             Err(ConfigError::Validation(errs)) => {
                 assert_eq!(errs.len(), 2, "all problems reported: {errs:?}");
-                assert!(errs.iter().any(|e| matches!(e, ConfigError::DuplicateId { kind: "tag", .. })));
-                assert!(errs.iter().any(|e| matches!(e, ConfigError::UnknownPollGroup { .. })));
+                assert!(errs
+                    .iter()
+                    .any(|e| matches!(e, ConfigError::DuplicateId { kind: "tag", .. })));
+                assert!(errs
+                    .iter()
+                    .any(|e| matches!(e, ConfigError::UnknownPollGroup { .. })));
             }
             other => panic!("expected Validation error, got {other:?}"),
         }
@@ -445,7 +481,14 @@ mod tests {
     #[test]
     fn bus_overload_warning_does_not_fail_the_load() {
         let regs: Vec<_> = (0..5u16)
-            .map(|i| entry(&format!("t{i}"), FC::ReadHoldingRegisters, i * 1000, DT::U16))
+            .map(|i| {
+                entry(
+                    &format!("t{i}"),
+                    FC::ReadHoldingRegisters,
+                    i * 1000,
+                    DT::U16,
+                )
+            })
             .collect();
         let c = cfg(
             vec![pg("fast", 50)],

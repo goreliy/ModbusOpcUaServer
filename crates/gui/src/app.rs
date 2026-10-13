@@ -73,6 +73,7 @@ pub struct ConfigApp {
     history: crate::history::History,
     /// Открытые окна графиков по тегам.
     charts: Vec<crate::history::ChartWindow>,
+    disk_snapshot: Option<Vec<u8>>,
 }
 
 #[derive(Default)]
@@ -100,6 +101,7 @@ impl ConfigApp {
             addr_hex: false,
             history: crate::history::History::default(),
             charts: Vec::new(),
+            disk_snapshot: None,
         }
     }
 }
@@ -142,9 +144,20 @@ impl eframe::App for ConfigApp {
                 ctx.request_repaint_after(Duration::from_millis(100));
             }
         }
-        if self.server.pump() || self.server.is_running() {
+        if self.server.pump() || self.server.is_running() || self.server.is_busy() {
             // Пока сервер жив — обновляем метрики/значения раз в секунду.
-            ctx.request_repaint_after(Duration::from_secs(1));
+            ctx.request_repaint_after(if self.server.is_busy() { Duration::from_millis(250) } else { Duration::from_secs(1) });
+        }
+        if let Some((bytes, cfg)) = self.server.take_external_config() {
+            if self.dirty {
+                self.status = "Файл изменён извне; несохранённые правки оставлены в редакторе. Сохраните их в другой файл или откройте актуальную конфигурацию после останова.".into();
+            } else {
+                self.cfg = cfg;
+                self.disk_snapshot = Some(bytes);
+                self.section = Section::Server;
+                self.selected_register = None;
+                self.status = "Редактор обновлён из изменённого файла конфигурации".into();
+            }
         }
 
         // Наполняем историю значений для открытых графиков (только по тем
@@ -183,15 +196,16 @@ impl ConfigApp {
         };
         match std::fs::read_to_string(&path)
             .map_err(|e| e.to_string())
-            .and_then(|text| serde_json::from_str::<ConfigFile>(&text).map_err(|e| e.to_string()))
+            .and_then(|text| serde_json::from_str::<ConfigFile>(&text).map(|cfg| (cfg, text.into_bytes())).map_err(|e| e.to_string()))
         {
-            Ok(ConfigFile::V1(cfg)) => {
+            Ok((ConfigFile::V1(cfg), bytes)) => {
                 self.cfg = cfg;
                 self.status = format!("Открыт {}", path.display());
                 self.path = Some(path);
                 self.dirty = false;
                 self.section = Section::Server;
                 self.selected_register = None;
+                self.disk_snapshot = Some(bytes);
             }
             Err(e) => self.status = format!("Ошибка открытия: {e}"),
         }
@@ -211,6 +225,21 @@ impl ConfigApp {
             self.path.clone().unwrap()
         };
         let file = ConfigFile::V1(self.cfg.clone());
+        if self.path.as_ref() == Some(&path) {
+            if let Some(previous) = &self.disk_snapshot {
+                if std::fs::read(&path).ok().as_ref() != Some(previous) {
+                    self.status = "Сохранение отменено: файл изменён извне. Сохраните правки в другой файл или откройте актуальную версию.".into();
+                    return;
+                }
+            }
+        }
+        let problems: Vec<_> = gateway_config::validate::validate(&self.cfg).into_iter().filter(|e| !e.is_warning()).map(|e| e.to_string()).chain(
+            tags_core::check_config_formulas(self.cfg.channels.iter().flat_map(|c| &c.devices).flat_map(|d| &d.registers).map(|r| (r.tag.as_str(), r.formula.as_deref(), r.write_formula.as_deref())))
+        ).collect();
+        if !problems.is_empty() {
+            self.status = format!("Конфигурация не сохранена: {}", problems.join("; "));
+            return;
+        }
         match serde_json::to_string_pretty(&file)
             .map_err(|e| e.to_string())
             .and_then(|json| std::fs::write(&path, json).map_err(|e| e.to_string()))
@@ -219,6 +248,14 @@ impl ConfigApp {
                 self.status = format!("Сохранено в {}", path.display());
                 self.path = Some(path);
                 self.dirty = false;
+                self.disk_snapshot = std::fs::read(self.path.as_ref().unwrap()).ok();
+                self.server.watch_file(self.path.clone());
+                if self.server.is_running() {
+                    match gateway_config::load(self.path.as_ref().unwrap()) {
+                        Ok(cfg) => self.server.reload(cfg),
+                        Err(e) => self.server.last_error = Some(e.to_string()),
+                    }
+                }
             }
             Err(e) => self.status = format!("Ошибка сохранения: {e}"),
         }
@@ -422,7 +459,12 @@ impl ConfigApp {
                     ui.label("Останов...");
                 });
             }
+            ServerState::Reloading { .. } => {
+                ui.horizontal(|ui| { ui.spinner(); ui.label("Применение конфигурации без перезапуска..."); });
+            }
             ServerState::Running { stack, since } => {
+                ui.label(format!("Версия конфигурации: {}", stack.revision()));
+                if let Some(error) = &self.server.last_error { ui.colored_label(Color32::RED, error); }
                 let uptime = since.elapsed().as_secs();
                 ui.horizontal(|ui| {
                     ui.colored_label(Color32::from_rgb(0, 160, 0), "● Работает");
@@ -617,10 +659,16 @@ impl ConfigApp {
         } else {
             serde_json::to_string(&ConfigFile::V1(self.cfg.clone()))
                 .map_err(|e| e.to_string())
-                .and_then(|json| gateway_config::load_str(&json).map_err(|e| e.to_string()))
+                .and_then(|json| match &self.path {
+                    Some(path) => gateway_config::load_str_at(&json, path).map_err(|e| e.to_string()),
+                    None => gateway_config::load_str(&json).map_err(|e| e.to_string()),
+                })
         };
         match resolved {
-            Ok(cfg) => self.server.start(cfg),
+            Ok(cfg) => {
+                self.server.watch_file(self.path.clone());
+                self.server.start(cfg);
+            },
             Err(e) => self.server.last_error = Some(format!("конфиг: {e}")),
         }
     }

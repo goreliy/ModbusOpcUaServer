@@ -66,7 +66,11 @@ pub fn validate(cfg: &ConfigV1) -> Vec<ConfigError> {
     validate_opcua(&cfg.opcua, &mut errs);
 
     // Rule 1: unique channel / device / poll_group ids.
-    check_unique("channel", cfg.channels.iter().map(|c| c.id.as_str()), &mut errs);
+    check_unique(
+        "channel",
+        cfg.channels.iter().map(|c| c.id.as_str()),
+        &mut errs,
+    );
     check_unique(
         "poll_group",
         cfg.poll_groups.iter().map(|g| g.id.as_str()),
@@ -97,7 +101,9 @@ pub fn validate(cfg: &ConfigV1) -> Vec<ConfigError> {
     // i.e. a silent 1000-polls-per-second schedule.
     for g in &cfg.poll_groups {
         if g.period_ms == 0 {
-            errs.push(ConfigError::BadPollPeriod { group: g.id.clone() });
+            errs.push(ConfigError::BadPollPeriod {
+                group: g.id.clone(),
+            });
         }
     }
 
@@ -105,6 +111,13 @@ pub fn validate(cfg: &ConfigV1) -> Vec<ConfigError> {
         .poll_groups
         .iter()
         .map(|g| (g.id.as_str(), g.period_ms))
+        .collect();
+
+    let folders: HashSet<String> = cfg
+        .channels
+        .iter()
+        .flat_map(|c| &c.devices)
+        .map(|d| format!("dev:{}", d.id))
         .collect();
 
     for ch in &cfg.channels {
@@ -135,6 +148,11 @@ pub fn validate(cfg: &ConfigV1) -> Vec<ConfigError> {
 
         for dev in &ch.devices {
             for entry in &dev.registers {
+                if folders.contains(&entry.tag) {
+                    errs.push(ConfigError::TagFolderCollision {
+                        tag: entry.tag.clone(),
+                    });
+                }
                 validate_entry(ch, entry, is_stream, &periods, &mut errs);
             }
         }
@@ -180,7 +198,8 @@ fn validate_transport(ch: &ChannelConfig, errs: &mut Vec<ConfigError>) {
         })
     };
     match &ch.transport {
-        TransportConfig::Tcp { host, port, .. } | TransportConfig::RtuOverTcp { host, port, .. } => {
+        TransportConfig::Tcp { host, port, .. }
+        | TransportConfig::RtuOverTcp { host, port, .. } => {
             if host.trim().is_empty() {
                 bad("host must not be empty".into());
             }
@@ -220,7 +239,9 @@ fn validate_opcua(opcua: &crate::schema::v1::OpcUaConfig, errs: &mut Vec<ConfigE
         return;
     }
     fn bad(errs: &mut Vec<ConfigError>, reason: impl Into<String>) {
-        errs.push(ConfigError::BadOpcUa { reason: reason.into() });
+        errs.push(ConfigError::BadOpcUa {
+            reason: reason.into(),
+        });
     }
     if opcua.port == 0 {
         bad(errs, "port must be non-zero");
@@ -231,13 +252,21 @@ fn validate_opcua(opcua: &crate::schema::v1::OpcUaConfig, errs: &mut Vec<ConfigE
     // B2 (groundwork): a bind-all host without advertised_host puts
     // 0.0.0.0/:: into the endpoint URLs clients receive from discovery.
     if opcua.advertised_host.is_none() && matches!(opcua.host.trim(), "0.0.0.0" | "::" | "[::]") {
-        errs.push(ConfigError::OpcUaNoAdvertisedHost { host: opcua.host.clone() });
+        errs.push(ConfigError::OpcUaNoAdvertisedHost {
+            host: opcua.host.clone(),
+        });
     }
     if !opcua.allow_none_security && !opcua.basic256sha256 {
-        bad(errs, "all security policies disabled: enable allow_none_security or basic256sha256");
+        bad(
+            errs,
+            "all security policies disabled: enable allow_none_security or basic256sha256",
+        );
     }
     if !opcua.allow_anonymous && opcua.users.is_empty() {
-        bad(errs, "allow_anonymous is false but no users are configured — nobody could connect");
+        bad(
+            errs,
+            "allow_anonymous is false but no users are configured — nobody could connect",
+        );
     }
     let mut seen = std::collections::HashSet::new();
     for u in &opcua.users {
@@ -249,11 +278,17 @@ fn validate_opcua(opcua: &crate::schema::v1::OpcUaConfig, errs: &mut Vec<ConfigE
         match (&u.password, &u.password_hash) {
             (Some(_), Some(_)) => bad(
                 errs,
-                format!("user `{}`: set either password or password_hash, not both", u.username),
+                format!(
+                    "user `{}`: set either password or password_hash, not both",
+                    u.username
+                ),
             ),
             (None, None) => bad(
                 errs,
-                format!("user `{}`: one of password / password_hash is required", u.username),
+                format!(
+                    "user `{}`: one of password / password_hash is required",
+                    u.username
+                ),
             ),
             (Some(_), None) => errs.push(ConfigError::WeakOpcUaSecurity {
                 reason: format!(
@@ -264,7 +299,10 @@ fn validate_opcua(opcua: &crate::schema::v1::OpcUaConfig, errs: &mut Vec<ConfigE
             }),
             (None, Some(h)) if !h.starts_with("$argon2") => bad(
                 errs,
-                format!("user `{}`: password_hash is not an argon2 PHC string", u.username),
+                format!(
+                    "user `{}`: password_hash is not an argon2 PHC string",
+                    u.username
+                ),
             ),
             (None, Some(_)) => {}
         }
@@ -331,10 +369,7 @@ fn validate_entry(
     if entry.custom_request.is_some() && !matches!(entry.function, FunctionCode::Custom { .. }) {
         errs.push(ConfigError::BadCustomRequest {
             tag: entry.tag.clone(),
-            reason: format!(
-                "only valid on a custom function, not {:?}",
-                entry.function
-            ),
+            reason: format!("only valid on a custom function, not {:?}", entry.function),
         });
     }
 
@@ -420,7 +455,8 @@ fn validate_writable(entry: &RegisterEntry, errs: &mut Vec<ConfigError>) {
         FunctionCode::ReadCoils => {
             // FC05/FC15 write-back. A coil source may only use a coil write FC.
             match entry.write_function {
-                None | Some(FunctionCode::WriteSingleCoil)
+                None
+                | Some(FunctionCode::WriteSingleCoil)
                 | Some(FunctionCode::WriteMultipleCoils) => {}
                 Some(FunctionCode::WriteSingleRegister)
                 | Some(FunctionCode::WriteMultipleRegisters) => not_writable(
@@ -465,11 +501,12 @@ fn validate_writable(entry: &RegisterEntry, errs: &mut Vec<ConfigError>) {
                         );
                     }
                 }
-                Some(FunctionCode::WriteSingleCoil)
-                | Some(FunctionCode::WriteMultipleCoils) => not_writable(
-                    "write_function is a coil write, but the source is a holding register — \
+                Some(FunctionCode::WriteSingleCoil) | Some(FunctionCode::WriteMultipleCoils) => {
+                    not_writable(
+                        "write_function is a coil write, but the source is a holding register — \
                      use write_single_register (FC06) or write_multiple_registers (FC16)",
-                ),
+                    )
+                }
                 Some(other) => not_writable(&format!(
                     "write_function must be a write FC (write_single_register / \
                      write_multiple_registers), not {other:?}"
@@ -579,7 +616,9 @@ fn merge_runs(mut ivals: Vec<(u32, u32)>, max_gap: u32, area_max: u32) -> Vec<(u
     let mut out: Vec<(u32, u32)> = Vec::new();
     for (s, e) in ivals {
         match out.last_mut() {
-            Some((rs, re)) if s.saturating_sub(*re) <= max_gap && e.saturating_sub(*rs) <= area_max => {
+            Some((rs, re))
+                if s.saturating_sub(*re) <= max_gap && e.saturating_sub(*rs) <= area_max =>
+            {
                 *re = (*re).max(e);
             }
             _ => out.push((s, e)),
@@ -621,7 +660,9 @@ fn estimate_bus_load(
             }
             match entry.function.read_area() {
                 Some(area) => {
-                    let Some(span) = entry_span(entry, area) else { continue };
+                    let Some(span) = entry_span(entry, area) else {
+                        continue;
+                    };
                     let start = u32::from(entry.address);
                     buckets
                         .entry((entry.poll_group.as_str(), area_key(area)))
@@ -642,7 +683,11 @@ fn estimate_bus_load(
         for ((group, _), (area, ivals)) in buckets {
             for (s, e) in merge_runs(ivals, max_gap, u32::from(area.max_qty())) {
                 let qty = e - s;
-                let payload = if area.is_bit_domain() { qty.div_ceil(8) } else { qty * 2 };
+                let payload = if area.is_bit_domain() {
+                    qty.div_ceil(8)
+                } else {
+                    qty * 2
+                };
                 *per_group_ms.entry(group).or_default() +=
                     txn_ms(payload, baud, ch.inter_request_delay_ms);
             }
@@ -683,7 +728,11 @@ mod tests {
     use mb_types::{DataType as DT, FunctionCode as FC};
 
     fn assert_single<F: Fn(&ConfigError) -> bool>(errs: &[ConfigError], pred: F, what: &str) {
-        assert_eq!(errs.len(), 1, "{what}: expected exactly one error, got {errs:?}");
+        assert_eq!(
+            errs.len(),
+            1,
+            "{what}: expected exactly one error, got {errs:?}"
+        );
         assert!(pred(&errs[0]), "{what}: wrong error: {:?}", errs[0]);
     }
 
@@ -753,11 +802,19 @@ mod tests {
             vec![
                 tcp_channel(
                     "ch1",
-                    vec![device("d1", 1, vec![entry("t1", FC::ReadHoldingRegisters, 0, DT::U16)])],
+                    vec![device(
+                        "d1",
+                        1,
+                        vec![entry("t1", FC::ReadHoldingRegisters, 0, DT::U16)],
+                    )],
                 ),
                 tcp_channel(
                     "ch2",
-                    vec![device("d2", 1, vec![entry("t1", FC::ReadInputRegisters, 5, DT::U16)])],
+                    vec![device(
+                        "d2",
+                        1,
+                        vec![entry("t1", FC::ReadInputRegisters, 5, DT::U16)],
+                    )],
                 ),
             ],
         );
@@ -772,7 +829,10 @@ mod tests {
     fn unknown_poll_group_fk() {
         let mut e = entry("t1", FC::ReadHoldingRegisters, 0, DT::U16);
         e.poll_group = "nope".into();
-        let cfg = cfg(vec![pg("fast", 200)], vec![tcp_channel("ch1", vec![device("d1", 1, vec![e])])]);
+        let cfg = cfg(
+            vec![pg("fast", 200)],
+            vec![tcp_channel("ch1", vec![device("d1", 1, vec![e])])],
+        );
         assert_single(
             &validate(&cfg),
             |e| matches!(e, ConfigError::UnknownPollGroup { tag, group } if tag == "t1" && group == "nope"),
@@ -786,7 +846,11 @@ mod tests {
             vec![pg("fast", 200)],
             vec![tcp_channel(
                 "ch1",
-                vec![device("d1", 1, vec![entry("t1", FC::ReadCoils, 0, DT::U16)])],
+                vec![device(
+                    "d1",
+                    1,
+                    vec![entry("t1", FC::ReadCoils, 0, DT::U16)],
+                )],
             )],
         );
         assert_single(
@@ -802,7 +866,11 @@ mod tests {
             vec![pg("fast", 200)],
             vec![tcp_channel(
                 "ch1",
-                vec![device("d1", 1, vec![entry("t1", FC::ReadHoldingRegisters, 0, DT::Bit)])],
+                vec![device(
+                    "d1",
+                    1,
+                    vec![entry("t1", FC::ReadHoldingRegisters, 0, DT::Bit)],
+                )],
             )],
         );
         assert_single(
@@ -814,12 +882,18 @@ mod tests {
         // With a valid bit index it passes; with bit >= 16 it fails.
         let mut ok = entry("t1", FC::ReadHoldingRegisters, 0, DT::Bit);
         ok.bit = Some(15);
-        let good = cfg(vec![pg("fast", 200)], vec![tcp_channel("ch1", vec![device("d1", 1, vec![ok])])]);
+        let good = cfg(
+            vec![pg("fast", 200)],
+            vec![tcp_channel("ch1", vec![device("d1", 1, vec![ok])])],
+        );
         assert!(validate(&good).is_empty());
 
         let mut bad = entry("t1", FC::ReadHoldingRegisters, 0, DT::Bit);
         bad.bit = Some(16);
-        let broken = cfg(vec![pg("fast", 200)], vec![tcp_channel("ch1", vec![device("d1", 1, vec![bad])])]);
+        let broken = cfg(
+            vec![pg("fast", 200)],
+            vec![tcp_channel("ch1", vec![device("d1", 1, vec![bad])])],
+        );
         assert_single(
             &validate(&broken),
             |e| matches!(e, ConfigError::BadBitIndex { bit: 16, .. }),
@@ -833,7 +907,11 @@ mod tests {
             vec![pg("fast", 200)],
             vec![tcp_channel(
                 "ch1",
-                vec![device("d1", 1, vec![entry("t1", FC::ReadDiscreteInputs, 7, DT::Bit)])],
+                vec![device(
+                    "d1",
+                    1,
+                    vec![entry("t1", FC::ReadDiscreteInputs, 7, DT::Bit)],
+                )],
             )],
         );
         assert!(validate(&cfg).is_empty());
@@ -845,7 +923,11 @@ mod tests {
             vec![pg("fast", 200)],
             vec![tcp_channel(
                 "ch1",
-                vec![device("d1", 1, vec![entry("t1", FC::WriteSingleRegister, 0, DT::U16)])],
+                vec![device(
+                    "d1",
+                    1,
+                    vec![entry("t1", FC::WriteSingleRegister, 0, DT::U16)],
+                )],
             )],
         );
         assert_single(
@@ -861,7 +943,11 @@ mod tests {
             vec![pg("fast", 200)],
             vec![tcp_channel(
                 "ch1",
-                vec![device("d1", 1, vec![entry("t1", FC::ReadHoldingRegisters, 0, DT::Ascii)])],
+                vec![device(
+                    "d1",
+                    1,
+                    vec![entry("t1", FC::ReadHoldingRegisters, 0, DT::Ascii)],
+                )],
             )],
         );
         assert_single(
@@ -875,10 +961,22 @@ mod tests {
     fn ascii_length_over_cap_is_rejected() {
         let mut e = entry("t1", FC::ReadHoldingRegisters, 0, DT::Ascii);
         e.length = Some(200);
-        let cfg = cfg(vec![pg("fast", 200)], vec![tcp_channel("ch1", vec![device("d1", 1, vec![e])])]);
+        let cfg = cfg(
+            vec![pg("fast", 200)],
+            vec![tcp_channel("ch1", vec![device("d1", 1, vec![e])])],
+        );
         assert_single(
             &validate(&cfg),
-            |e| matches!(e, ConfigError::QtyExceedsCap { qty: 200, max: 125, .. }),
+            |e| {
+                matches!(
+                    e,
+                    ConfigError::QtyExceedsCap {
+                        qty: 200,
+                        max: 125,
+                        ..
+                    }
+                )
+            },
             "ascii cap",
         );
     }
@@ -887,7 +985,10 @@ mod tests {
     fn zero_length_is_rejected() {
         let mut e = entry("t1", FC::ReadHoldingRegisters, 0, DT::Bcd);
         e.length = Some(0);
-        let cfg = cfg(vec![pg("fast", 200)], vec![tcp_channel("ch1", vec![device("d1", 1, vec![e])])]);
+        let cfg = cfg(
+            vec![pg("fast", 200)],
+            vec![tcp_channel("ch1", vec![device("d1", 1, vec![e])])],
+        );
         assert_single(
             &validate(&cfg),
             |e| matches!(e, ConfigError::ZeroLength { tag } if tag == "t1"),
@@ -901,12 +1002,25 @@ mod tests {
             vec![pg("fast", 200)],
             vec![tcp_channel(
                 "ch1",
-                vec![device("d1", 1, vec![entry("t1", FC::ReadHoldingRegisters, 65533, DT::U64)])],
+                vec![device(
+                    "d1",
+                    1,
+                    vec![entry("t1", FC::ReadHoldingRegisters, 65533, DT::U64)],
+                )],
             )],
         );
         assert_single(
             &validate(&cfg),
-            |e| matches!(e, ConfigError::AddressOverflow { address: 65533, qty: 4, .. }),
+            |e| {
+                matches!(
+                    e,
+                    ConfigError::AddressOverflow {
+                        address: 65533,
+                        qty: 4,
+                        ..
+                    }
+                )
+            },
             "addr overflow",
         );
     }
@@ -920,13 +1034,17 @@ mod tests {
         );
         // Serial RTU also always gets the framing HARD ERROR (B6).
         let errs = validate(&on_rtu);
-        assert_eq!(errs.len(), 2, "missing-len error + serial-rtu error: {errs:?}");
+        assert_eq!(
+            errs.len(),
+            2,
+            "missing-len error + serial-rtu error: {errs:?}"
+        );
         assert!(errs.iter().any(
             |e| matches!(e, ConfigError::MissingCustomResponseLen { tag, channel } if tag == "t1" && channel == "bus1")
         ));
-        assert!(errs.iter().any(
-            |e| matches!(e, ConfigError::CustomReadOnSerialRtu { .. }) && !e.is_warning()
-        ));
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, ConfigError::CustomReadOnSerialRtu { .. }) && !e.is_warning()));
 
         // Same on RtuOverTcp.
         let e = entry_custom("t1", 0x41, None);
@@ -960,7 +1078,16 @@ mod tests {
         );
         assert_single(
             &validate(&cfg),
-            |e| matches!(e, ConfigError::BadCustomResponseLen { len: 500, max: 250, .. }),
+            |e| {
+                matches!(
+                    e,
+                    ConfigError::BadCustomResponseLen {
+                        len: 500,
+                        max: 250,
+                        ..
+                    }
+                )
+            },
             "custom cap",
         );
     }
@@ -981,7 +1108,10 @@ mod tests {
             |e| matches!(e, ConfigError::CustomReadOnSerialRtu { tag, channel } if tag == "t1" && channel == "bus1"),
             "custom on serial rtu",
         );
-        assert!(!errs[0].is_warning(), "must be a hard error (was a warning pre-B6)");
+        assert!(
+            !errs[0].is_warning(),
+            "must be a hard error (was a warning pre-B6)"
+        );
 
         // Same entry on RtuOverTcp: accepted silently (single-segment replies
         // frame reliably in practice).
@@ -1023,7 +1153,10 @@ mod tests {
                 |e| matches!(e, ConfigError::CustomCodeCollision { tag, code: c } if tag == "t1" && *c == code),
                 &format!("collision {code}"),
             );
-            assert!(errs[0].is_warning(), "collision must be a warning, not an error");
+            assert!(
+                errs[0].is_warning(),
+                "collision must be a warning, not an error"
+            );
         }
 
         // A genuinely vendor-specific code passes without noise.
@@ -1041,7 +1174,11 @@ mod tests {
             vec![pg("fast", 0)],
             vec![tcp_channel(
                 "ch1",
-                vec![device("d1", 1, vec![entry("t1", FC::ReadHoldingRegisters, 0, DT::U16)])],
+                vec![device(
+                    "d1",
+                    1,
+                    vec![entry("t1", FC::ReadHoldingRegisters, 0, DT::U16)],
+                )],
             )],
         );
         assert_single(
@@ -1052,7 +1189,10 @@ mod tests {
     }
 
     fn one_entry_cfg(e: RegisterEntry) -> crate::schema::v1::ConfigV1 {
-        cfg(vec![pg("fast", 200)], vec![tcp_channel("ch1", vec![device("d1", 1, vec![e])])])
+        cfg(
+            vec![pg("fast", 200)],
+            vec![tcp_channel("ch1", vec![device("d1", 1, vec![e])])],
+        )
     }
 
     #[test]
@@ -1062,7 +1202,11 @@ mod tests {
             vec![pg("fast", 200)],
             vec![tcp_channel(
                 "ch1",
-                vec![device("d1", 1, vec![entry("t1", FC::ReadHoldingRegisters, 0, DT::U16)])],
+                vec![device(
+                    "d1",
+                    1,
+                    vec![entry("t1", FC::ReadHoldingRegisters, 0, DT::U16)],
+                )],
             )],
         );
 
@@ -1071,7 +1215,10 @@ mod tests {
 
         // No anonymous + no users = nobody can connect.
         let mut c = base.clone();
-        c.opcua = OpcUaConfig { allow_anonymous: false, ..opcua() };
+        c.opcua = OpcUaConfig {
+            allow_anonymous: false,
+            ..opcua()
+        };
         assert_single(
             &validate(&c),
             |e| matches!(e, ConfigError::BadOpcUa { .. }),
@@ -1081,13 +1228,23 @@ mod tests {
         // Duplicate usernames (plaintext passwords also warn — filter those).
         let mut c = base.clone();
         c.opcua.users = vec![
-            OpcUaUser { username: "op".into(), password: Some("1".into()), password_hash: None },
-            OpcUaUser { username: "op".into(), password: Some("2".into()), password_hash: None },
+            OpcUaUser {
+                username: "op".into(),
+                password: Some("1".into()),
+                password_hash: None,
+            },
+            OpcUaUser {
+                username: "op".into(),
+                password: Some("2".into()),
+                password_hash: None,
+            },
         ];
         let errs = validate(&c);
         let hard: Vec<_> = errs.iter().filter(|e| !e.is_warning()).collect();
         assert_eq!(hard.len(), 1, "duplicate users: {errs:?}");
-        assert!(matches!(hard[0], ConfigError::BadOpcUa { reason } if reason.contains("duplicate")));
+        assert!(
+            matches!(hard[0], ConfigError::BadOpcUa { reason } if reason.contains("duplicate"))
+        );
         assert_eq!(
             errs.iter().filter(|e| e.is_warning()).count(),
             2,
@@ -1107,7 +1264,11 @@ mod tests {
             "both set",
         );
         let mut c = base.clone();
-        c.opcua.users = vec![OpcUaUser { username: "none".into(), password: None, password_hash: None }];
+        c.opcua.users = vec![OpcUaUser {
+            username: "none".into(),
+            password: None,
+            password_hash: None,
+        }];
         assert_single(
             &validate(&c),
             |e| matches!(e, ConfigError::BadOpcUa { reason } if reason.contains("required")),
@@ -1151,8 +1312,12 @@ mod tests {
         // Disabled section skips all checks (incl. the advertised-host one:
         // OpcUaConfig::default() binds 0.0.0.0 without advertised_host).
         let mut c = base;
-        c.opcua =
-            OpcUaConfig { enabled: false, port: 0, allow_anonymous: false, ..OpcUaConfig::default() };
+        c.opcua = OpcUaConfig {
+            enabled: false,
+            port: 0,
+            allow_anonymous: false,
+            ..OpcUaConfig::default()
+        };
         assert!(validate(&c).is_empty());
     }
 
@@ -1190,10 +1355,19 @@ mod tests {
     #[test]
     fn custom_request_parses_hex_edge_cases() {
         // Spaces optional, case-insensitive.
-        assert_eq!(parse_custom_request("01 a0 ff").unwrap(), vec![0x01, 0xa0, 0xff]);
-        assert_eq!(parse_custom_request("01A0FF").unwrap(), vec![0x01, 0xa0, 0xff]);
+        assert_eq!(
+            parse_custom_request("01 a0 ff").unwrap(),
+            vec![0x01, 0xa0, 0xff]
+        );
+        assert_eq!(
+            parse_custom_request("01A0FF").unwrap(),
+            vec![0x01, 0xa0, 0xff]
+        );
         assert_eq!(parse_custom_request("  00 ").unwrap(), vec![0x00]);
-        assert_eq!(parse_custom_request("0 1a 0f f").unwrap(), vec![0x01, 0xa0, 0xff]);
+        assert_eq!(
+            parse_custom_request("0 1a 0f f").unwrap(),
+            vec![0x01, 0xa0, 0xff]
+        );
         // Cap: 250 bytes ok, 251 rejected.
         assert_eq!(parse_custom_request(&"ab".repeat(250)).unwrap().len(), 250);
         assert!(parse_custom_request(&"ab".repeat(251)).is_err());
@@ -1287,7 +1461,9 @@ mod tests {
         e.scale = 0.0;
         let errs = validate(&one_entry_cfg(e));
         assert!(
-            errs.iter().any(|e| matches!(e, ConfigError::NotWritable { reason, .. } if reason.contains("scale"))),
+            errs.iter().any(
+                |e| matches!(e, ConfigError::NotWritable { reason, .. } if reason.contains("scale"))
+            ),
             "scale 0: {errs:?}"
         );
 
@@ -1307,13 +1483,19 @@ mod tests {
         let mut e = entry("t", FC::ReadHoldingRegisters, 0, DT::U16);
         e.writable = true;
         e.write_function = Some(FC::WriteMultipleRegisters);
-        assert!(validate(&one_entry_cfg(e)).is_empty(), "holding + FC16 forced is valid");
+        assert!(
+            validate(&one_entry_cfg(e)).is_empty(),
+            "holding + FC16 forced is valid"
+        );
 
         // Coil + FC15 forced: OK.
         let mut e = entry("t", FC::ReadCoils, 0, DT::Bit);
         e.writable = true;
         e.write_function = Some(FC::WriteMultipleCoils);
-        assert!(validate(&one_entry_cfg(e)).is_empty(), "coil + FC15 forced is valid");
+        assert!(
+            validate(&one_entry_cfg(e)).is_empty(),
+            "coil + FC15 forced is valid"
+        );
 
         // Coil source + register write FC: rejected.
         let mut e = entry("t", FC::ReadCoils, 0, DT::Bit);
@@ -1416,7 +1598,14 @@ mod tests {
         // Same hopeless layout as bus_overload_emits_warning_not_error, but
         // the channel is disabled: it is never polled, so no warning.
         let regs: Vec<_> = (0..5u16)
-            .map(|i| entry(&format!("t{i}"), FC::ReadHoldingRegisters, i * 1000, DT::U16))
+            .map(|i| {
+                entry(
+                    &format!("t{i}"),
+                    FC::ReadHoldingRegisters,
+                    i * 1000,
+                    DT::U16,
+                )
+            })
             .collect();
         let mut ch = rtu_channel("bus1", 1200, vec![device("d1", 1, regs)]);
         ch.enabled = false;
@@ -1463,7 +1652,9 @@ mod tests {
         };
         let errs = validate(&cfg(vec![pg("fast", 200)], vec![ch]));
         assert_eq!(errs.len(), 3, "aggregated, not first-fail: {errs:?}");
-        assert!(errs.iter().all(|e| matches!(e, ConfigError::BadTransport { .. })));
+        assert!(errs
+            .iter()
+            .all(|e| matches!(e, ConfigError::BadTransport { .. })));
     }
 
     #[test]
@@ -1488,7 +1679,10 @@ mod tests {
             |e| matches!(e, ConfigError::MaxInflightUnsupported { value: 4, .. }),
             "inflight on tcp",
         );
-        assert!(errs[0].is_warning(), "TCP over-ask is a warning, not an error");
+        assert!(
+            errs[0].is_warning(),
+            "TCP over-ask is a warning, not an error"
+        );
 
         // max_inflight 1 is always silent.
         let ch = tcp_channel("ch1", vec![]);
@@ -1500,7 +1694,14 @@ mod tests {
         // 1200 baud, 50 ms period, 5 scattered single-register reads with
         // max_gap 0 => ~137 ms of airtime per txn, hopelessly over budget.
         let regs: Vec<_> = (0..5u16)
-            .map(|i| entry(&format!("t{i}"), FC::ReadHoldingRegisters, i * 1000, DT::U16))
+            .map(|i| {
+                entry(
+                    &format!("t{i}"),
+                    FC::ReadHoldingRegisters,
+                    i * 1000,
+                    DT::U16,
+                )
+            })
             .collect();
         let cfg = cfg(
             vec![pg("fast", 50)],
@@ -1519,7 +1720,14 @@ mod tests {
     fn coalescable_layout_stays_under_budget() {
         // Same register count but contiguous + bridgeable at sane baud: no warning.
         let regs: Vec<_> = (0..5u16)
-            .map(|i| entry(&format!("t{i}"), FC::ReadHoldingRegisters, 100 + i * 2, DT::U32))
+            .map(|i| {
+                entry(
+                    &format!("t{i}"),
+                    FC::ReadHoldingRegisters,
+                    100 + i * 2,
+                    DT::U32,
+                )
+            })
             .collect();
         let mut ch = rtu_channel("bus1", 19200, vec![device("d1", 1, regs)]);
         ch.max_gap = 4;

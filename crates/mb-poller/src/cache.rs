@@ -146,6 +146,14 @@ impl TagCache {
         self.slots.is_empty()
     }
 
+    /// Seed a prepared generation before starting its writers. Preserves the
+    /// acquisition timestamp and quality; copying is not a fresh device read.
+    pub fn seed(&self, tag: TagId, snapshot: Snapshot) {
+        if let Some(slot) = self.slots.get(tag.0 as usize) {
+            *slot.inner.write() = snapshot;
+        }
+    }
+
     fn send_batch(&self, tags: Arc<[TagId]>) {
         // #24: reserve + send atomically so `seq` is monotonic in delivery
         // order across all channel tasks (sub-µs critical section, no await).
@@ -175,8 +183,8 @@ impl RawValueSink for TagCache {
         for t in tags {
             let mut g = self.slots[t.0 as usize].inner.write();
             g.quality = q; // last value kept (SCADA convention)
-            // #25: `mono` is the time of the last VALUE — a quality flip must
-            // not make a minutes-old value look 0 ms stale.
+                           // #25: `mono` is the time of the last VALUE — a quality flip must
+                           // not make a minutes-old value look 0 ms stale.
         }
         self.send_batch(Arc::from(tags)); // watchdog MUST notify
     }
@@ -192,7 +200,9 @@ impl RawValueSink for TagCache {
 
 impl CacheReader for TagCache {
     fn snapshot(&self, tag: TagId) -> Option<Snapshot> {
-        self.slots.get(tag.0 as usize).map(|s| s.inner.read().clone())
+        self.slots
+            .get(tag.0 as usize)
+            .map(|s| s.inner.read().clone())
     }
 
     fn resolve(&self, name: &str) -> Option<TagId> {

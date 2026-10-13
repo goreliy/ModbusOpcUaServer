@@ -8,6 +8,7 @@
 pub mod decode;
 pub mod engine;
 pub mod formula;
+mod graph;
 pub mod persist;
 pub mod store;
 pub mod value;

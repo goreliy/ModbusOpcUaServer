@@ -252,6 +252,7 @@ dependencies = [
  "gateway-config",
  "opcua-gateway",
  "svc-host",
+ "tags-core",
  "tokio",
  "tracing",
 ]
@@ -2143,6 +2144,7 @@ dependencies = [
  "serde_json",
  "svc-host",
  "tags-core",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -4307,14 +4309,18 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 name = "svc-host"
 version = "0.1.0"
 dependencies = [
+ "async-opcua",
  "diag-log",
  "gateway-config",
  "mb-poller",
+ "mb-types",
  "opcua-gateway",
+ "serde_json",
  "tags-core",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-modbus",
  "tracing",
  "windows-service",
 ]

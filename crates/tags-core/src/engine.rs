@@ -27,6 +27,8 @@ pub enum EngineError {
     },
     #[error(transparent)]
     Persist(#[from] PersistError),
+    #[error("{0}")]
+    Dependencies(String),
 }
 
 /// Per-tag processing recipe, compiled once at engine start.
@@ -56,6 +58,10 @@ pub struct TagEngine {
     store: Arc<TypedStore>,
     metas: Vec<Option<TagMeta>>,
     persist: Option<Persist>,
+    calculated: Arc<TypedStore>,
+    graph: crate::graph::DependencyGraph,
+    receiver: Option<broadcast::Receiver<ChangeBatch>>,
+    primed: bool,
 }
 
 impl TagEngine {
@@ -68,7 +74,25 @@ impl TagEngine {
         persist: Option<Persist>,
     ) -> Result<Self, EngineError> {
         let store = Arc::new(TypedStore::new(cfg));
-        let lookup: Arc<dyn crate::formula::TagLookup> = Arc::clone(&store) as _;
+        let calculated = Arc::new(TypedStore::new(cfg));
+        let lookup: Arc<dyn crate::formula::TagLookup> = Arc::clone(&calculated) as _;
+        let mut formulas = vec![None; cfg.tag_count()];
+        for reg in cfg
+            .channels
+            .iter()
+            .flat_map(|c| &c.devices)
+            .flat_map(|d| &d.registers)
+        {
+            formulas[reg.tag.0 as usize] = reg.formula.as_deref();
+            if let Some(text) = &reg.write_formula {
+                crate::Formula::compile(text, "value", None).map_err(|source| {
+                    EngineError::Formula {
+                        tag: cfg.tag_names[reg.tag.0 as usize].clone(),
+                        source,
+                    }
+                })?;
+            }
+        }
 
         let mut metas: Vec<Option<TagMeta>> = (0..cfg.tag_names.len()).map(|_| None).collect();
         for ch in &cfg.channels {
@@ -100,7 +124,24 @@ impl TagEngine {
             }
         }
 
-        let engine = Self { cache, store, metas, persist };
+        let graph = crate::graph::DependencyGraph::build(
+            cfg.tag_names
+                .iter()
+                .zip(&formulas)
+                .map(|(name, formula)| (name.as_str(), *formula)),
+        )
+        .map_err(EngineError::Dependencies)?;
+        let receiver = Some(cache.subscribe());
+        let engine = Self {
+            cache,
+            store,
+            metas,
+            persist,
+            calculated,
+            graph,
+            receiver,
+            primed: false,
+        };
         engine.restore_retentive()?;
         Ok(engine)
     }
@@ -110,8 +151,28 @@ impl TagEngine {
         Arc::clone(&self.store)
     }
 
+    /// Recompute immediately before publishing a newly prepared generation.
+    pub fn refresh(&mut self) {
+        let tags: Vec<_> = self.graph.order.clone();
+        let mut last = self.published_numbers();
+        self.process(&tags, &mut last);
+        self.primed = true;
+    }
+
+    fn published_numbers(&self) -> Vec<Option<f64>> {
+        (0..self.metas.len())
+            .map(|i| {
+                self.store
+                    .snapshot(TagId(i as u32))
+                    .and_then(|s| s.value.as_f64())
+            })
+            .collect()
+    }
+
     fn restore_retentive(&self) -> Result<(), EngineError> {
-        let Some(persist) = &self.persist else { return Ok(()) };
+        let Some(persist) = &self.persist else {
+            return Ok(());
+        };
         let mut restored = Vec::new();
         for (i, meta) in self.metas.iter().enumerate() {
             let Some(meta) = meta else { continue };
@@ -119,7 +180,9 @@ impl TagEngine {
                 continue;
             }
             let tag = TagId(i as u32);
-            let Some(name) = self.store.name(tag) else { continue };
+            let Some(name) = self.store.name(tag) else {
+                continue;
+            };
             if let Some(sv) = persist.load_retentive(name)? {
                 let (value, ts) = sv.to_typed();
                 self.store.restore(tag, value, ts);
@@ -127,7 +190,10 @@ impl TagEngine {
             }
         }
         if !restored.is_empty() {
-            tracing::info!(count = restored.len(), "retentive tags restored (Uncertain)");
+            tracing::info!(
+                count = restored.len(),
+                "retentive tags restored (Uncertain)"
+            );
             self.store.send_batch(restored.into());
         }
         Ok(())
@@ -138,18 +204,29 @@ impl TagEngine {
         let store = Arc::clone(&self.store);
         let (sd_tx, sd_rx) = watch::channel(false);
         let task = tokio::spawn(self.run(sd_rx));
-        (EngineHandle { shutdown: sd_tx, task }, store)
+        (
+            EngineHandle {
+                shutdown: sd_tx,
+                task,
+            },
+            store,
+        )
     }
 
-    async fn run(self, mut shutdown: watch::Receiver<bool>) {
+    async fn run(mut self, mut shutdown: watch::Receiver<bool>) {
         // Subscribe FIRST, then do a full initial pass — an update landing in
         // between is processed twice, which is idempotent.
-        let mut rx = self.cache.subscribe();
+        let mut rx = self
+            .receiver
+            .take()
+            .expect("engine owns one raw subscription");
         // Deadband memory: last PUBLISHED numeric per tag (task-local).
-        let mut last_published: Vec<Option<f64>> = vec![None; self.metas.len()];
+        let mut last_published = self.published_numbers();
 
         let initial: Vec<TagId> = self.cache.snapshot_all().iter().map(|(t, _)| *t).collect();
-        self.process(&initial, &mut last_published);
+        if !self.primed {
+            self.process(&initial, &mut last_published);
+        }
 
         loop {
             tokio::select! {
@@ -184,21 +261,73 @@ impl TagEngine {
     /// Decode + transform + gate one batch of tags; emit one typed batch.
     fn process(&self, tags: &[TagId], last_published: &mut [Option<f64>]) {
         let mut changed = Vec::with_capacity(tags.len());
-        for &tag in tags {
-            let Some(Some(meta)) = self.metas.get(tag.0 as usize) else { continue };
-            let Some(raw) = self.cache.snapshot(tag) else { continue };
+        let affected = self.graph.affected(tags);
+        // Freeze the raw inputs for this evaluation wave.
+        let inputs: Vec<_> = (0..self.metas.len())
+            .map(|i| {
+                if affected[i] {
+                    self.cache.snapshot(TagId(i as u32))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for &tag in &self.graph.order {
+            if !affected[tag.0 as usize] {
+                continue;
+            }
+            let Some(Some(meta)) = self.metas.get(tag.0 as usize) else {
+                continue;
+            };
+            let Some(raw) = &inputs[tag.0 as usize] else {
+                continue;
+            };
+            // A formula solely over other tags has no dependency on this
+            // register's value or communication quality.
+            let computed = mb_poller::Snapshot {
+                value: mb_poller::RawValue::Absent,
+                quality: Quality::Good,
+                source_ts: std::time::SystemTime::now(),
+                mono: std::time::Instant::now(),
+                seq: 0,
+            };
+            let raw = if meta.transform.uses_raw() {
+                raw
+            } else {
+                &computed
+            };
+            let mut quality = raw.quality;
+            let mut ts = raw.source_ts;
+            let mut mono = raw.mono;
+            for &dep in &self.graph.dependencies[tag.0 as usize] {
+                if let Some(snap) = self.calculated.snapshot(dep) {
+                    quality = match (quality, snap.quality) {
+                        (Quality::Bad, _) | (_, Quality::Bad) => Quality::Bad,
+                        (Quality::Uncertain, _) | (_, Quality::Uncertain) => Quality::Uncertain,
+                        _ => Quality::Good,
+                    };
+                    ts = ts.min(snap.source_ts);
+                    mono = mono.min(snap.mono);
+                }
+            }
 
             // Non-Good raw: propagate quality, keep the last typed value.
-            if raw.quality != Quality::Good {
+            if quality != Quality::Good {
+                self.calculated.set_quality(tag, quality);
                 let prev = self.store.snapshot(tag).map(|s| s.quality);
-                if prev != Some(raw.quality) {
-                    self.store.set_quality(tag, raw.quality);
+                if prev != Some(quality) {
+                    self.store.set_quality(tag, quality);
                     changed.push(tag);
                 }
                 continue;
             }
 
-            let typed = match decode(&raw.value, meta.decode)
+            let decoded = if meta.transform.uses_raw() {
+                decode(&raw.value, meta.decode)
+            } else {
+                Ok(crate::TypedValue::Float(0.0))
+            };
+            let typed = match decoded
                 .map_err(|e| e.to_string())
                 .and_then(|v| meta.transform.apply(v).map_err(|e| e.to_string()))
             {
@@ -206,6 +335,7 @@ impl TagEngine {
                 Err(e) => {
                     // Decode/formula failure: the value cannot be trusted.
                     tracing::warn!(tag = tag.0, error = %e, "decode/formula failed: tag Bad");
+                    self.calculated.set_quality(tag, Quality::Bad);
                     let prev = self.store.snapshot(tag).map(|s| s.quality);
                     if prev != Some(Quality::Bad) {
                         self.store.set_quality(tag, Quality::Bad);
@@ -214,6 +344,19 @@ impl TagEngine {
                     continue;
                 }
             };
+            if typed.as_f64().is_some_and(|v| !v.is_finite()) {
+                self.calculated.set_quality(tag, Quality::Bad);
+                if self
+                    .store
+                    .snapshot(tag)
+                    .is_some_and(|s| s.quality != Quality::Bad)
+                {
+                    self.store.set_quality(tag, Quality::Bad);
+                    changed.push(tag);
+                }
+                continue;
+            }
+            self.calculated.publish_value(tag, typed.clone(), ts, mono);
 
             // Deadband gate — value-only suppression; a quality recovery
             // (previous typed not Good) always publishes.
@@ -236,13 +379,13 @@ impl TagEngine {
             if let Some(f) = typed.as_f64() {
                 last_published[tag.0 as usize] = Some(f);
             }
-            self.store.publish_value(tag, typed.clone(), raw.source_ts, raw.mono);
+            self.store.publish_value(tag, typed.clone(), ts, mono);
             changed.push(tag);
 
             // Persistence (by stable NAME).
             if meta.retentive || meta.retain_last > 0 {
                 if let (Some(persist), Some(name)) = (&self.persist, self.store.name(tag)) {
-                    if let Some(sv) = StoredValue::from_typed(&typed, raw.source_ts) {
+                    if let Some(sv) = StoredValue::from_typed(&typed, ts) {
                         if meta.retentive {
                             if let Err(e) = persist.store_retentive(name, &sv) {
                                 tracing::warn!(tag = name, error = %e, "retentive store failed");
@@ -292,6 +435,106 @@ mod tests {
             &[(tag, RawValue::Registers(Arc::from(regs)))],
             SystemTime::now(),
             Instant::now(),
+        );
+    }
+
+    #[test]
+    fn cascade_is_order_independent_and_deadband_does_not_round_inputs() {
+        // Reverse declaration order; diamond a -> b,c -> d.
+        let (cfg, cache) = setup(
+            r#"
+            {"tag":"d","poll_group":"fast","function":"read_holding_registers","address":3,"data_type":"u16","formula":"tag(\"b\") + tag(\"c\")"},
+            {"tag":"c","poll_group":"fast","function":"read_holding_registers","address":2,"data_type":"u16","formula":"tag(\"a\") * 3"},
+            {"tag":"b","poll_group":"fast","function":"read_holding_registers","address":1,"data_type":"u16","formula":"tag(\"a\") * 2"},
+            {"tag":"a","poll_group":"fast","function":"read_holding_registers","address":0,"data_type":"u16","deadband":10.0}
+        "#,
+        );
+        // No raw samples for computed b/c/d: only a is an actual source.
+        publish_regs(&cache, TagId(3), &[100]);
+        let engine = TagEngine::new(&cfg, cache.clone() as _, None).unwrap();
+        let mut last = vec![None; 4];
+        engine.process(&[TagId(0), TagId(1), TagId(2), TagId(3)], &mut last);
+        let store = engine.store();
+        assert_eq!(
+            store.snapshot(TagId(0)).unwrap().value,
+            TypedValue::Float(500.0)
+        );
+        let before = store.snapshot(TagId(0)).unwrap().seq;
+        publish_regs(&cache, TagId(3), &[102]);
+        engine.process(&[TagId(3), TagId(3)], &mut last);
+        assert_eq!(
+            store.snapshot(TagId(3)).unwrap().value,
+            TypedValue::UInt(100)
+        );
+        assert_eq!(
+            store.snapshot(TagId(0)).unwrap().value,
+            TypedValue::Float(510.0)
+        );
+        assert_eq!(
+            store.snapshot(TagId(0)).unwrap().seq,
+            before + 1,
+            "diamond must evaluate once per wave"
+        );
+        cache.set_device_quality(&[TagId(3)], Quality::Uncertain);
+        engine.process(&[TagId(3)], &mut last);
+        for i in 0..4 {
+            assert_eq!(
+                store.snapshot(TagId(i)).unwrap().quality,
+                Quality::Uncertain
+            );
+        }
+        cache.set_device_quality(&[TagId(3)], Quality::Bad);
+        engine.process(&[TagId(3)], &mut last);
+        assert_eq!(store.snapshot(TagId(0)).unwrap().quality, Quality::Bad);
+        assert_eq!(
+            store.snapshot(TagId(0)).unwrap().value,
+            TypedValue::Float(510.0)
+        );
+        publish_regs(&cache, TagId(3), &[103]);
+        engine.process(&[TagId(3)], &mut last);
+        assert_eq!(store.snapshot(TagId(0)).unwrap().quality, Quality::Good);
+        assert_eq!(
+            store.snapshot(TagId(0)).unwrap().value,
+            TypedValue::Float(515.0)
+        );
+    }
+
+    #[test]
+    fn non_finite_formula_marks_dependents_bad_and_can_recover() {
+        let (cfg, cache) = setup(
+            r#"
+            {"tag":"a","poll_group":"fast","function":"read_holding_registers","address":0,"data_type":"u16","formula":"1 / raw"},
+            {"tag":"b","poll_group":"fast","function":"read_holding_registers","address":1,"data_type":"u16","formula":"tag(\"a\") * 2"}
+        "#,
+        );
+        let engine = TagEngine::new(&cfg, cache.clone() as _, None).unwrap();
+        let mut last = vec![None; 2];
+        publish_regs(&cache, TagId(0), &[2]);
+        publish_regs(&cache, TagId(1), &[0]);
+        engine.process(&[TagId(0), TagId(1)], &mut last);
+        assert_eq!(
+            engine.store.snapshot(TagId(1)).unwrap().value,
+            TypedValue::Float(1.0)
+        );
+        publish_regs(&cache, TagId(0), &[0]);
+        engine.process(&[TagId(0)], &mut last);
+        assert_eq!(
+            engine.store.snapshot(TagId(0)).unwrap().quality,
+            Quality::Bad
+        );
+        assert_eq!(
+            engine.store.snapshot(TagId(1)).unwrap().quality,
+            Quality::Bad
+        );
+        publish_regs(&cache, TagId(0), &[4]);
+        engine.process(&[TagId(0)], &mut last);
+        assert_eq!(
+            engine.store.snapshot(TagId(1)).unwrap().quality,
+            Quality::Good
+        );
+        assert_eq!(
+            engine.store.snapshot(TagId(1)).unwrap().value,
+            TypedValue::Float(0.5)
         );
     }
 
@@ -394,7 +637,10 @@ mod tests {
         publish_regs(&cache, TagId(1), &[5]);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        assert_eq!(store.snapshot(TagId(1)).unwrap().value, TypedValue::Float(15.0));
+        assert_eq!(
+            store.snapshot(TagId(1)).unwrap().value,
+            TypedValue::Float(15.0)
+        );
 
         handle.shutdown().await;
     }
@@ -409,7 +655,10 @@ mod tests {
             Err(e) => e,
             Ok(_) => panic!("bad formula must fail engine construction"),
         };
-        assert!(matches!(&err, EngineError::Formula { tag, .. } if tag == "broken"), "{err}");
+        assert!(
+            matches!(&err, EngineError::Formula { tag, .. } if tag == "broken"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
@@ -421,22 +670,31 @@ mod tests {
         // First life: publish, shutdown (flushes).
         {
             let (cfg, cache) = setup(regs);
-            let engine =
-                TagEngine::new(&cfg, Arc::clone(&cache) as _, Some(Persist::open(dir.path()).unwrap()))
-                    .unwrap();
+            let engine = TagEngine::new(
+                &cfg,
+                Arc::clone(&cache) as _,
+                Some(Persist::open(dir.path()).unwrap()),
+            )
+            .unwrap();
             let (handle, store) = engine.spawn();
             publish_regs(&cache, TagId(0), &[555]);
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            assert_eq!(store.snapshot(TagId(0)).unwrap().value, TypedValue::UInt(555));
+            assert_eq!(
+                store.snapshot(TagId(0)).unwrap().value,
+                TypedValue::UInt(555)
+            );
             handle.shutdown().await;
         }
 
         // Second life: restored as Uncertain before any poll.
         {
             let (cfg, cache) = setup(regs);
-            let engine =
-                TagEngine::new(&cfg, Arc::clone(&cache) as _, Some(Persist::open(dir.path()).unwrap()))
-                    .unwrap();
+            let engine = TagEngine::new(
+                &cfg,
+                Arc::clone(&cache) as _,
+                Some(Persist::open(dir.path()).unwrap()),
+            )
+            .unwrap();
             let store = engine.store();
             let s = store.snapshot(TagId(0)).unwrap();
             assert_eq!(s.value, TypedValue::UInt(555), "value restored from sled");

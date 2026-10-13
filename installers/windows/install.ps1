@@ -1,4 +1,4 @@
-﻿# Установщик OPC Modbus Server (ПРОБНАЯ СБОРКА) для Windows.
+﻿# Установщик OPC Modbus Server для Windows (полная или пробная сборка).
 #
 # Копирует бинарники в Program Files, кладёт пример конфига в ProgramData,
 # регистрирует и запускает службу, создаёт ярлык на конфигуратор в меню Пуск
@@ -68,6 +68,10 @@ Copy-Item (Join-Path $src 'uninstall.ps1') $InstallDir -Force -ErrorAction Silen
 
 Write-Host ""
 Write-Host "Готово. Служба 'opc-modbus-server' установлена (автозапуск)."
-Write-Host "ВНИМАНИЕ: это ПРОБНАЯ сборка — сервер работает непрерывно не более 3 часов,"
-Write-Host "после чего останавливается; перезапустите службу для продолжения."
+$buildInfo = (& $serverExe build-info | ConvertFrom-Json)
+if ($buildInfo.trial) {
+    Write-Host "Пробная сборка: лимит непрерывной работы $($buildInfo.runtime_limit_seconds) секунд."
+} else {
+    Write-Host "Полная сборка: ограничения времени работы нет."
+}
 Write-Host "Конфиг: $cfgPath   |   Конфигуратор: меню Пуск."

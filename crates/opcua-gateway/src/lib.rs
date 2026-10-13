@@ -12,6 +12,7 @@ pub mod write;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use opcua::nodes::NodeBase;
 use opcua::server::address_space::Variable;
 use opcua::server::diagnostics::NamespaceMetadata;
 use opcua::server::node_manager::memory::{simple_node_manager, SimpleNodeManager};
@@ -48,9 +49,51 @@ pub struct OpcUaHandle {
     pump_shutdown: watch::Sender<bool>,
     server_task: JoinHandle<Result<(), String>>,
     pump_task: JoinHandle<()>,
+    reconfigure: mpsc::Sender<Reconfigure>,
+    write_plans: Arc<parking_lot::RwLock<HashMap<String, WritePlan>>>,
+}
+
+struct Reconfigure {
+    cfg: Arc<ResolvedConfig>,
+    typed: Arc<dyn TypedReader>,
+    plans: HashMap<String, WritePlan>,
+    done: tokio::sync::oneshot::Sender<()>,
 }
 
 impl OpcUaHandle {
+    pub fn is_running(&self) -> bool {
+        !self.server_task.is_finished()
+            && !self.pump_task.is_finished()
+            && !self.reconfigure.is_closed()
+    }
+    /// Reject writes during a generation transition. Existing in-flight writes
+    /// finish against the old poller; queued commands cannot reach the new one.
+    pub fn pause_writes(&self) {
+        self.write_plans.write().clear();
+    }
+
+    /// Retarget values, metadata and writes while keeping the listener/session
+    /// manager alive. The pump serializes the change with old value batches.
+    pub async fn reconfigure(
+        &self,
+        cfg: Arc<ResolvedConfig>,
+        typed: Arc<dyn TypedReader>,
+        writers: HashMap<ChannelId, mpsc::Sender<WriteCommand>>,
+    ) -> Result<(), OpcUaError> {
+        let plans = build_write_plans(&cfg, &writers)?;
+        let (done, rx) = tokio::sync::oneshot::channel();
+        self.reconfigure
+            .send(Reconfigure {
+                cfg,
+                typed,
+                plans,
+                done,
+            })
+            .await
+            .map_err(|_| OpcUaError::Build("value pump stopped".into()))?;
+        rx.await
+            .map_err(|_| OpcUaError::Build("value pump stopped during reload".into()))
+    }
     /// Endpoint URL clients connect to (built from the ADVERTISED host, see
     /// [`OpcUaConfig::advertised_host`]).
     pub fn endpoint_url(&self) -> String {
@@ -117,7 +160,7 @@ pub fn spawn(
     }
 
     // Compile write plans first: a bad write_formula fails the boot.
-    let write_plans = build_write_plans(cfg, &writers)?;
+    let write_plans = Arc::new(parking_lot::RwLock::new(build_write_plans(cfg, &writers)?));
 
     let (server, handle, authenticator) = build_server(opcua_cfg)?;
 
@@ -132,19 +175,7 @@ pub fn spawn(
     build_address_space(cfg, ns, &node_manager);
 
     // Wire the write-back callbacks (phase 4).
-    for (name, plan) in write_plans {
-        let node = NodeId::new(ns, name.as_str());
-        let plan = Arc::new(plan);
-        node_manager.inner().add_write_callback(node, move |dv, _range| {
-            let status = plan.execute(dv);
-            if status.is_good() {
-                tracing::info!(tag = %name, "OPC UA write acknowledged by device");
-            } else {
-                tracing::warn!(tag = %name, %status, "OPC UA write failed");
-            }
-            status
-        });
-    }
+    install_write_callbacks(cfg, ns, &node_manager, &write_plans);
 
     // Initial values (retentive restores may already be present).
     let subscriptions = handle.subscriptions().clone();
@@ -158,8 +189,12 @@ pub fn spawn(
 
     // ---- value pump ----
     let (sd_tx, mut sd_rx) = watch::channel(false);
-    let pump_typed = Arc::clone(&typed);
+    let mut pump_typed = Arc::clone(&typed);
     let pump_manager = Arc::clone(&node_manager);
+    let pump_plans = Arc::clone(&write_plans);
+    let mut active_nodes = configured_nodes(cfg, ns);
+    let mut active_parents = configured_parents(cfg, ns);
+    let (reconfigure, mut reconfigure_rx) = mpsc::channel::<Reconfigure>(1);
     let pump_task = tokio::spawn(async move {
         let mut rx = pump_typed.subscribe();
         loop {
@@ -169,6 +204,29 @@ pub fn spawn(
                     if res.is_err() || *sd_rx.borrow() {
                         return;
                     }
+                }
+                Some(update) = reconfigure_rx.recv() => {
+                    let next_nodes = configured_nodes(&update.cfg, ns);
+                    let next_parents = configured_parents(&update.cfg, ns);
+                    {
+                        let address_space = pump_manager.address_space();
+                        let mut space = address_space.write();
+                        for id in active_nodes.difference(&next_nodes) { space.delete(id, true); }
+                        for (id, parent) in &active_parents {
+                            if next_parents.get(id) != Some(parent) {
+                                space.delete_reference(parent, id, &NodeId::from(opcua::types::ReferenceTypeId::Organizes));
+                            }
+                        }
+                    }
+                    build_address_space(&update.cfg, ns, &pump_manager);
+                    install_write_callbacks(&update.cfg, ns, &pump_manager, &pump_plans);
+                    pump_typed = update.typed;
+                    rx = pump_typed.subscribe();
+                    push_values(&pump_manager, &subscriptions, ns, &*pump_typed, pump_typed.snapshot_all().into_iter());
+                    *pump_plans.write() = update.plans;
+                    active_nodes = next_nodes;
+                    active_parents = next_parents;
+                    let _ = update.done.send(());
                 }
                 msg = rx.recv() => match msg {
                     Ok(batch) => {
@@ -212,12 +270,21 @@ pub fn spawn(
         pump_shutdown: sd_tx,
         server_task,
         pump_task,
+        reconfigure,
+        write_plans,
     })
 }
 
 fn build_server(
     c: &OpcUaConfig,
-) -> Result<(opcua::server::Server, ServerHandle, Arc<GatewayAuthenticator>), OpcUaError> {
+) -> Result<
+    (
+        opcua::server::Server,
+        ServerHandle,
+        Arc<GatewayAuthenticator>,
+    ),
+    OpcUaError,
+> {
     let (builder, authenticator) = server_builder(c);
     let (server, handle) = builder.build().map_err(OpcUaError::Build)?;
     Ok((server, handle, authenticator))
@@ -314,7 +381,14 @@ fn build_address_space(cfg: &ResolvedConfig, ns: u16, manager: &Arc<SimpleNodeMa
     for ch in &cfg.channels {
         for dev in &ch.devices {
             let folder_id = NodeId::new(ns, format!("dev:{}", dev.name));
-            space.add_folder(&folder_id, &dev.name, &dev.name, &NodeId::objects_folder_id());
+            if !space.node_exists(&folder_id) {
+                space.add_folder(
+                    &folder_id,
+                    &dev.name,
+                    &dev.name,
+                    &NodeId::objects_folder_id(),
+                );
+            }
 
             // Initial value/status is set right after build by the full
             // snapshot push (Absent -> BadWaitingForInitialData).
@@ -322,9 +396,7 @@ fn build_address_space(cfg: &ResolvedConfig, ns: u16, manager: &Arc<SimpleNodeMa
                 .registers
                 .iter()
                 .map(|reg| {
-                    let name = cfg
-                        .tag_name(reg.tag)
-                        .expect("resolved register has a name");
+                    let name = cfg.tag_name(reg.tag).expect("resolved register has a name");
                     let mut v = Variable::new_data_value(
                         &NodeId::new(ns, name),
                         name,
@@ -343,8 +415,78 @@ fn build_address_space(cfg: &ResolvedConfig, ns: u16, manager: &Arc<SimpleNodeMa
                     v
                 })
                 .collect();
-            let _ = space.add_variables(vars, &folder_id);
+            // Replace metadata in place for surviving NodeIds. Monitored items
+            // continue to refer to the same IDs. Rebuild the parent reference
+            // when a tag was moved to another device.
+            let mut added = Vec::new();
+            for var in vars {
+                let id = var.node_id().clone();
+                if let Some(existing) = space.find_node_mut(&id) {
+                    *existing = var.into();
+                    use opcua::types::ReferenceTypeId;
+                    space.insert_reference(&folder_id, &id, ReferenceTypeId::Organizes);
+                } else {
+                    added.push(var);
+                }
+            }
+            let _ = space.add_variables(added, &folder_id);
         }
+    }
+}
+
+fn configured_nodes(cfg: &ResolvedConfig, ns: u16) -> std::collections::HashSet<NodeId> {
+    let mut ids: std::collections::HashSet<_> = cfg
+        .tag_names
+        .iter()
+        .map(|name| NodeId::new(ns, name.as_str()))
+        .collect();
+    for dev in cfg.channels.iter().flat_map(|c| &c.devices) {
+        ids.insert(NodeId::new(ns, format!("dev:{}", dev.name)));
+    }
+    ids
+}
+
+fn configured_parents(cfg: &ResolvedConfig, ns: u16) -> HashMap<NodeId, NodeId> {
+    cfg.channels
+        .iter()
+        .flat_map(|c| &c.devices)
+        .flat_map(|dev| {
+            dev.registers.iter().map(move |reg| {
+                (
+                    NodeId::new(ns, cfg.tag_name(reg.tag).unwrap()),
+                    NodeId::new(ns, format!("dev:{}", dev.name)),
+                )
+            })
+        })
+        .collect()
+}
+
+fn install_write_callbacks(
+    cfg: &ResolvedConfig,
+    ns: u16,
+    manager: &Arc<SimpleNodeManager>,
+    plans: &Arc<parking_lot::RwLock<HashMap<String, WritePlan>>>,
+) {
+    for reg in cfg
+        .channels
+        .iter()
+        .flat_map(|c| &c.devices)
+        .flat_map(|d| &d.registers)
+        .filter(|r| r.writable)
+    {
+        let name = cfg.tag_name(reg.tag).unwrap().to_owned();
+        let plans = Arc::clone(plans);
+        manager
+            .inner()
+            .add_write_callback(NodeId::new(ns, name.as_str()), move |dv, _| {
+                // Hold the generation read guard through execution so reload waits
+                // for an already accepted write rather than redirecting it.
+                plans
+                    .read()
+                    .get(&name)
+                    .map(|p| p.execute(dv))
+                    .unwrap_or(StatusCode::BadNotWritable)
+            });
     }
 }
 
@@ -381,12 +523,13 @@ fn opcua_data_type(reg: &gateway_config::ResolvedRegister) -> opcua::types::Data
     use opcua::types::DataTypeId;
 
     let transformed = reg.formula.is_some() || reg.scale != 1.0 || reg.offset != 0.0;
-    let is_boolish = matches!(reg.data_type, DT::Bit) || (reg.data_type == DT::Bitfield && reg.bit.is_some());
-    if is_boolish {
-        return DataTypeId::Boolean;
-    }
+    let is_boolish =
+        matches!(reg.data_type, DT::Bit) || (reg.data_type == DT::Bitfield && reg.bit.is_some());
     if transformed {
         return DataTypeId::Double;
+    }
+    if is_boolish {
+        return DataTypeId::Boolean;
     }
     match reg.data_type {
         DT::Bit => DataTypeId::Boolean,
@@ -430,6 +573,18 @@ fn system_time_to_datetime(ts: std::time::SystemTime) -> DateTime {
 mod tests {
     use super::*;
 
+    #[test]
+    fn transformed_bit_advertises_double_matching_the_formula_result() {
+        let cfg = gateway_config::load_str(r#"{
+            "schema_version":"1", "poll_groups":[{"id":"p","period_ms":100}],
+            "channels":[{"id":"c","transport":{"type":"tcp","host":"127.0.0.1"},"devices":[{"id":"d","unit_id":1,"registers":[{"tag":"bit","poll_group":"p","address":0,"function":"read_coils","data_type":"bit","formula":"1 - raw"}]}]}]
+        }"#).unwrap();
+        assert_eq!(
+            opcua_data_type(&cfg.channels[0].devices[0].registers[0]),
+            opcua::types::DataTypeId::Double
+        );
+    }
+
     /// B2: with `advertised_host` set, the ServerConfig used for endpoint
     /// descriptions (`tcp_config.host` -> `base_endpoint()` -> GetEndpoints
     /// URLs) and the discovery URLs both carry the ADVERTISED host — the
@@ -463,7 +618,10 @@ mod tests {
         };
         let (builder, _auth) = server_builder(&cfg);
         let sc = builder.config();
-        assert_eq!(sc.discovery_urls, vec!["opc.tcp://10.1.2.3:4840/".to_string()]);
+        assert_eq!(
+            sc.discovery_urls,
+            vec!["opc.tcp://10.1.2.3:4840/".to_string()]
+        );
         assert_eq!(sc.tcp_config.host, "10.1.2.3");
     }
 }

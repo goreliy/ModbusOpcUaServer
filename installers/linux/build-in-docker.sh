@@ -2,7 +2,7 @@
 # Собирает Linux-артефакты OPC Modbus Server внутри rust-контейнера:
 #   .deb (cargo-deb), .rpm (cargo-generate-rpm), портируемый .tar.gz.
 # Ожидает проект в /work, пишет пакеты в /work/dist/linux.
-# Feature `trial` уже зашита в app/gui — сборка обычная.
+# По умолчанию полная сборка без ограничения времени работы.
 set -euo pipefail
 
 echo "=== системные зависимости ==="

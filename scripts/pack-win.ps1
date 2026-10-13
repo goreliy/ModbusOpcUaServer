@@ -1,11 +1,15 @@
 ﻿# Собрать актуальные серверный/GUI EXE и самостоятельный EXE-установщик.
 # Запуск из любой папки: powershell -ExecutionPolicy Bypass -File scripts/pack-win.ps1
 param(
-    [string]$Version = "0.1.0-trial",
-    [switch]$SkipBuild
+    [string]$Version = "",
+    [switch]$SkipBuild,
+    [switch]$Trial
 )
 
 $ErrorActionPreference = 'Stop'
+if (-not $Version) { $Version = if ($Trial) { '0.1.0-trial' } else { '0.1.0-full' } }
+if ($Version -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw 'Invalid package version' }
+if (($Version -match 'trial') -ne [bool]$Trial) { throw 'Package version and -Trial must agree' }
 $repo = Split-Path -Parent $PSScriptRoot
 $releaseDir = Join-Path $repo 'target\release'
 $workDir = Join-Path $repo "target\package\OPC-Modbus-Server-$Version-win64"
@@ -15,6 +19,24 @@ $installer = Join-Path $outputDir "OPC-Modbus-Server-Setup-$Version-win64.exe"
 $serverOutput = Join-Path $outputDir 'opc-modbus-server.exe'
 $configOutput = Join-Path $outputDir 'opc-modbus-config.exe'
 
+function Read-BuildInfo([string]$Exe, [string]$Arguments) {
+    $start = New-Object System.Diagnostics.ProcessStartInfo
+    $start.FileName = $Exe
+    $start.Arguments = $Arguments
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::Start($start)
+    try {
+        $stdout = $process.StandardOutput.ReadToEnd()
+        $stderr = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0) { throw "Build info failed: $Exe`: $stderr" }
+        return ($stdout | ConvertFrom-Json)
+    } finally { $process.Dispose() }
+}
+
 Push-Location $repo
 try {
     if (-not $SkipBuild) {
@@ -22,7 +44,9 @@ try {
         $oldRustFlags = $env:RUSTFLAGS
         try {
             $env:RUSTFLAGS = '-C target-feature=+crt-static'
-            & cargo build --release --locked --offline -p app -p gui
+            $buildArgs = @('build', '--release', '--locked', '--offline', '--no-default-features', '-p', 'app', '-p', 'gui')
+            if ($Trial) { $buildArgs += @('--features', 'app/trial,gui/trial') }
+            & cargo @buildArgs
             if ($LASTEXITCODE -ne 0) { throw "cargo build failed: $LASTEXITCODE" }
         }
         finally {
@@ -35,6 +59,24 @@ try {
     if (-not (Test-Path -LiteralPath $server)) { throw "Missing $server" }
     if (-not (Test-Path -LiteralPath $config)) { throw "Missing $config" }
 
+    $serverInfo = Read-BuildInfo $server 'build-info'
+    $configInfo = Read-BuildInfo $config '--build-info'
+    foreach ($info in @($serverInfo, $configInfo)) {
+        if ($info.trial -ne [bool]$Trial -or $info.debug_assertions -or $info.arch -ne 'x86_64' -or $info.os -ne 'windows') {
+            throw 'Binaries do not match the requested Windows x64 release build'
+        }
+        if (-not $Trial -and $null -ne $info.runtime_limit_seconds) { throw 'Full build has a runtime limit' }
+    }
+
+    # Validate the absolute cleanup target inside this workspace before recursion.
+    $packageRoot = [System.IO.Path]::GetFullPath((Join-Path $repo 'target\package'))
+    $workDir = [System.IO.Path]::GetFullPath($workDir)
+    if (-not $workDir.StartsWith($packageRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Unsafe package staging path: $workDir"
+    }
+    if ((Test-Path -LiteralPath $workDir) -and ((Get-Item -LiteralPath $workDir).Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        throw "Refusing to clean a package junction: $workDir"
+    }
     if (Test-Path -LiteralPath $workDir) { Remove-Item -LiteralPath $workDir -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $workDir, $outputDir | Out-Null
 
@@ -47,6 +89,19 @@ try {
         (Join-Path $repo 'installers\windows\install.cmd'),
         (Join-Path $repo 'installers\windows\install.ps1'),
         (Join-Path $repo 'installers\windows\uninstall.ps1') -Destination $workDir -Force
+
+    $manifest = [ordered]@{
+        package_version = $Version
+        server = $serverInfo
+        configurator = $configInfo
+        sha256 = @{
+            server = (Get-FileHash -Algorithm SHA256 -LiteralPath $serverOutput).Hash
+            configurator = (Get-FileHash -Algorithm SHA256 -LiteralPath $configOutput).Hash
+        }
+    }
+    $manifestPath = Join-Path $outputDir 'build-info.json'
+    $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+    Copy-Item -LiteralPath $manifestPath -Destination $workDir -Force
 
     # The payload ZIP is an implementation detail contained inside the installer.
     Remove-Item -LiteralPath (Join-Path $outputDir "OPC-Modbus-Server-$Version-win64.zip") -Force -ErrorAction SilentlyContinue

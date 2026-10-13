@@ -11,13 +11,13 @@
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
      xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
   <Product Id="*"
-           Name="OPC Modbus Server (trial)"
+           Name="OPC Modbus Server"
            Language="1049"
            Version="0.1.0"
            Manufacturer="OPC Modbus Server"
            UpgradeCode="6f9d2c1a-8b4e-4c2a-9f31-2a7e5d1c0b44">
     <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine"
-             Description="OPC UA сервер с опросом Modbus (пробная сборка, 3 ч)" />
+             Description="OPC UA сервер с опросом Modbus" />
     <MajorUpgrade DowngradeErrorMessage="Уже установлена более новая версия." />
     <MediaTemplate EmbedCab="yes" />
 

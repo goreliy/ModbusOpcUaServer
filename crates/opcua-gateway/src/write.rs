@@ -16,8 +16,8 @@ use opcua::types::{DataValue, StatusCode, Variant};
 use tokio::sync::{mpsc, oneshot};
 
 use gateway_config::ResolvedConfig;
-use mb_proto::{ModbusRequest, ProtoError};
 use mb_poller::WriteCommand;
+use mb_proto::{ModbusRequest, ProtoError};
 use mb_types::{ChannelId, DataType, DeviceId, FunctionCode};
 use tags_core::{DecodeMeta, Formula, FormulaError, TypedValue};
 
@@ -93,16 +93,22 @@ pub fn build_write_plans(
             let wait = Duration::from_millis(worst_case_ms) + WRITE_QUEUE_MARGIN;
             for reg in dev.registers.iter().filter(|r| r.writable) {
                 let name = cfg.tag_name(reg.tag).expect("resolved tag has a name");
-                let sender = writers
-                    .get(&ch.id)
-                    .cloned()
-                    .ok_or_else(|| WritePlanError::NoWriter { tag: name.to_string() })?;
+                let sender =
+                    writers
+                        .get(&ch.id)
+                        .cloned()
+                        .ok_or_else(|| WritePlanError::NoWriter {
+                            tag: name.to_string(),
+                        })?;
                 let inverse = match &reg.write_formula {
-                    Some(text) => Inverse::Expr(
-                        Formula::compile(text, "value", None).map_err(|source| {
-                            WritePlanError::Formula { tag: name.to_string(), source }
-                        })?,
-                    ),
+                    Some(text) => {
+                        Inverse::Expr(Formula::compile(text, "value", None).map_err(|source| {
+                            WritePlanError::Formula {
+                                tag: name.to_string(),
+                                source,
+                            }
+                        })?)
+                    }
                     None if reg.scale != 1.0 || reg.offset != 0.0 => Inverse::Linear {
                         scale: reg.scale,
                         offset: reg.offset,
@@ -196,19 +202,23 @@ impl WritePlan {
 
     /// Engineering `Variant` -> inverse transform -> encoded Modbus request.
     fn to_request(&self, variant: &Variant) -> Result<ModbusRequest, StatusCode> {
+        let engineering = variant_to_f64(variant).ok_or(StatusCode::BadTypeMismatch)?;
+        if !engineering.is_finite() {
+            return Err(StatusCode::BadOutOfRange);
+        }
+        let raw = match &self.inverse {
+            Inverse::None => engineering,
+            Inverse::Linear { scale, offset } => (engineering - offset) / scale,
+            Inverse::Expr(f) => f
+                .eval("value", engineering)
+                .map_err(|_| StatusCode::BadInvalidArgument)?,
+        };
+        if !raw.is_finite() {
+            return Err(StatusCode::BadOutOfRange);
+        }
         match self.write_fn {
             WriteFn::SingleCoil | WriteFn::MultipleCoils => {
-                let on = match variant {
-                    Variant::Boolean(b) => *b,
-                    Variant::Byte(v) => *v != 0,
-                    Variant::Int16(v) => *v != 0,
-                    Variant::Int32(v) => *v != 0,
-                    Variant::Int64(v) => *v != 0,
-                    Variant::UInt16(v) => *v != 0,
-                    Variant::UInt32(v) => *v != 0,
-                    Variant::UInt64(v) => *v != 0,
-                    _ => return Err(StatusCode::BadTypeMismatch),
-                };
+                let on = raw != 0.0;
                 Ok(match self.write_fn {
                     // FC15: the single coil carried in a multi-write frame.
                     WriteFn::MultipleCoils => ModbusRequest::WriteMultipleCoils {
@@ -216,20 +226,15 @@ impl WritePlan {
                         values: vec![on],
                     },
                     // FC05.
-                    _ => ModbusRequest::WriteSingleCoil { addr: self.address, value: on },
+                    _ => ModbusRequest::WriteSingleCoil {
+                        addr: self.address,
+                        value: on,
+                    },
                 })
             }
             WriteFn::SingleRegister | WriteFn::MultipleRegisters | WriteFn::AutoRegisters => {
-                let engineering = variant_to_f64(variant).ok_or(StatusCode::BadTypeMismatch)?;
-                let raw = match &self.inverse {
-                    Inverse::None => engineering,
-                    Inverse::Linear { scale, offset } => (engineering - offset) / scale,
-                    Inverse::Expr(f) => f
-                        .eval("value", engineering)
-                        .map_err(|_| StatusCode::BadInvalidArgument)?,
-                };
-                let typed = raw_to_typed(raw, self.decode.data_type)
-                    .ok_or(StatusCode::BadOutOfRange)?;
+                let typed =
+                    raw_to_typed(raw, self.decode.data_type).ok_or(StatusCode::BadOutOfRange)?;
                 let words = tags_core::encode(&typed, self.decode)
                     .map_err(|_| StatusCode::BadTypeMismatch)?;
                 Ok(match self.write_fn {
@@ -344,7 +349,13 @@ mod tests {
     #[test]
     fn linear_inverse_and_encode() {
         // temp degC 23.7 with scale 0.1 -> raw 237.
-        let p = plan(DataType::I16, Inverse::Linear { scale: 0.1, offset: 0.0 });
+        let p = plan(
+            DataType::I16,
+            Inverse::Linear {
+                scale: 0.1,
+                offset: 0.0,
+            },
+        );
         match p.to_request(&Variant::Double(23.7)).unwrap() {
             ModbusRequest::WriteSingleRegister { addr, value } => {
                 assert_eq!((addr, value), (10, 237));
@@ -385,7 +396,10 @@ mod tests {
         };
         assert!(matches!(
             p.to_request(&Variant::Boolean(true)).unwrap(),
-            ModbusRequest::WriteSingleCoil { addr: 3, value: true }
+            ModbusRequest::WriteSingleCoil {
+                addr: 3,
+                value: true
+            }
         ));
         assert!(matches!(
             p.to_request(&Variant::UInt16(0)).unwrap(),
@@ -395,6 +409,33 @@ mod tests {
             p.to_request(&Variant::String("x".into())),
             Err(StatusCode::BadTypeMismatch)
         ));
+    }
+
+    #[test]
+    fn coil_inverse_applies_to_numeric_engineering_values_for_fc05_and_fc15() {
+        for write_fn in [WriteFn::SingleCoil, WriteFn::MultipleCoils] {
+            let (sender, _rx) = mpsc::channel(1);
+            let p = WritePlan {
+                device: DeviceId(0),
+                address: 3,
+                write_fn,
+                decode: DecodeMeta {
+                    data_type: DataType::Bit,
+                    word_order: WordOrder::BigEndian,
+                    byte_order: ByteOrder::BigEndian,
+                    bit: None,
+                },
+                inverse: Inverse::Expr(Formula::compile("1 - value", "value", None).unwrap()),
+                sender,
+                wait: Duration::from_secs(1),
+            };
+            match p.to_request(&Variant::Double(0.0)).unwrap() {
+                ModbusRequest::WriteSingleCoil { value, .. } => assert!(value),
+                ModbusRequest::WriteMultipleCoils { values, .. } => assert_eq!(values, vec![true]),
+                other => panic!("unexpected request: {other:?}"),
+            }
+            assert!(p.to_request(&Variant::Double(f64::NAN)).is_err());
+        }
     }
 
     /// FC15: a coil forced into a multi-write frame carries one coil value.
@@ -444,7 +485,10 @@ mod tests {
         p.write_fn = WriteFn::SingleRegister;
         assert!(matches!(
             p.to_request(&Variant::Double(42.0)).unwrap(),
-            ModbusRequest::WriteSingleRegister { addr: 10, value: 42 }
+            ModbusRequest::WriteSingleRegister {
+                addr: 10,
+                value: 42
+            }
         ));
     }
 
@@ -452,13 +496,25 @@ mod tests {
     fn range_and_type_guards() {
         let p = plan(DataType::U16, Inverse::None);
         // 70000 encodes over u16 -> encode() overflow -> BadTypeMismatch.
-        assert!(matches!(p.to_request(&Variant::Double(70000.0)), Err(StatusCode::BadTypeMismatch)));
+        assert!(matches!(
+            p.to_request(&Variant::Double(70000.0)),
+            Err(StatusCode::BadTypeMismatch)
+        ));
         // Negative into unsigned -> BadOutOfRange at raw_to_typed.
-        assert!(matches!(p.to_request(&Variant::Double(-5.0)), Err(StatusCode::BadOutOfRange)));
+        assert!(matches!(
+            p.to_request(&Variant::Double(-5.0)),
+            Err(StatusCode::BadOutOfRange)
+        ));
         // NaN -> BadOutOfRange.
-        assert!(matches!(p.to_request(&Variant::Double(f64::NAN)), Err(StatusCode::BadOutOfRange)));
+        assert!(matches!(
+            p.to_request(&Variant::Double(f64::NAN)),
+            Err(StatusCode::BadOutOfRange)
+        ));
         // Non-numeric -> BadTypeMismatch.
-        assert!(matches!(p.to_request(&Variant::String("x".into())), Err(StatusCode::BadTypeMismatch)));
+        assert!(matches!(
+            p.to_request(&Variant::String("x".into())),
+            Err(StatusCode::BadTypeMismatch)
+        ));
     }
 
     #[test]

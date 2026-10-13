@@ -26,6 +26,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Print the build type and runtime limit as JSON without starting services.
+    BuildInfo,
     /// Validate a configuration file and print what it resolves to.
     Validate {
         #[arg(short, long)]
@@ -69,6 +71,10 @@ enum ServiceCmd {
 fn main() {
     let cli = Cli::parse();
     let code = match cli.command {
+        Command::BuildInfo => {
+            println!("{}", svc_host::build_info());
+            0
+        }
         Command::Validate { config } => validate(&config),
         Command::Run { config } => run_console(&config),
         Command::HashPassword => hash_password(),
@@ -81,6 +87,23 @@ fn main() {
 fn validate(path: &PathBuf) -> i32 {
     match gateway_config::load(path) {
         Ok(cfg) => {
+            let regs = cfg
+                .channels
+                .iter()
+                .flat_map(|c| &c.devices)
+                .flat_map(|d| &d.registers)
+                .map(|r| {
+                    (
+                        cfg.tag_name(r.tag).unwrap(),
+                        r.formula.as_deref(),
+                        r.write_formula.as_deref(),
+                    )
+                });
+            let errors = tags_core::check_config_formulas(regs);
+            if !errors.is_empty() {
+                eprintln!("configuration invalid:\n{}", errors.join("\n"));
+                return 2;
+            }
             println!(
                 "OK: {} channel(s), {} device(s), {} tag(s)",
                 cfg.channels.len(),
@@ -128,14 +151,17 @@ fn run_console(path: &PathBuf) -> i32 {
         );
     }
 
-    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
         Ok(rt) => rt,
         Err(e) => {
             tracing::error!(error = %e, "tokio runtime");
             return 3;
         }
     };
-    let exit = runtime.block_on(svc_host::run_stack(cfg, async {
+    let exit = runtime.block_on(svc_host::run_stack_watched(cfg, path.clone(), async {
         if let Err(e) = tokio::signal::ctrl_c().await {
             tracing::error!(error = %e, "failed to listen for Ctrl+C");
             std::future::pending::<()>().await;
@@ -171,7 +197,8 @@ fn hash_password() -> i32 {
 }
 
 fn systemd_unit(config: &std::path::Path) -> i32 {
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/usr/bin/opc-modbus-server"));
+    let exe =
+        std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/usr/bin/opc-modbus-server"));
     print!("{}", svc_host::systemd_unit(&exe, config));
     0
 }

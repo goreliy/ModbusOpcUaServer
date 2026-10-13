@@ -57,7 +57,10 @@ impl StoredValue {
             TypedValue::Bytes(b) => StoredKind::Bytes(b.clone()),
             TypedValue::Absent => return None,
         };
-        let ts_ms = ts.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        let ts_ms = ts
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
         Some(Self { kind, ts_ms })
     }
 
@@ -74,6 +77,7 @@ impl StoredValue {
     }
 }
 
+#[derive(Clone)]
 pub struct Persist {
     _db: sled::Db,
     retentive: sled::Tree,
@@ -93,7 +97,8 @@ impl Persist {
 
     /// Persist the last value of a retentive tag.
     pub fn store_retentive(&self, name: &str, v: &StoredValue) -> Result<(), PersistError> {
-        self.retentive.insert(name.as_bytes(), serde_json::to_vec(v)?)?;
+        self.retentive
+            .insert(name.as_bytes(), serde_json::to_vec(v)?)?;
         Ok(())
     }
 
@@ -103,6 +108,12 @@ impl Persist {
             Some(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
             None => Ok(None),
         }
+    }
+
+    /// Invalidate a last value when a live edit changes its source/transform.
+    pub fn forget_retentive(&self, name: &str) -> Result<(), PersistError> {
+        self.retentive.remove(name.as_bytes())?;
+        Ok(())
     }
 
     /// Append to a tag's history ring, truncating to `cap` newest entries.
@@ -119,7 +130,8 @@ impl Persist {
         if ring.len() > cap {
             ring.drain(..ring.len() - cap);
         }
-        self.history.insert(name.as_bytes(), serde_json::to_vec(&ring)?)?;
+        self.history
+            .insert(name.as_bytes(), serde_json::to_vec(&ring)?)?;
         Ok(())
     }
 
@@ -144,7 +156,10 @@ mod tests {
     use super::*;
 
     fn sv(v: f64, ts_ms: u64) -> StoredValue {
-        StoredValue { kind: StoredKind::Float(v), ts_ms }
+        StoredValue {
+            kind: StoredKind::Float(v),
+            ts_ms,
+        }
     }
 
     #[test]
