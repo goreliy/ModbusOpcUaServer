@@ -1,0 +1,5 @@
+﻿[mcp_servers.opc_modbus_demo_cf785a7698ec]
+enabled = true
+command = "D:\\123321\\rust opc_ua 20 test\\dist\\windows\\opc-modbus-server.exe"
+args = ["mcp","--config","C:\\ProgramData\\OPC Modbus Server\\config.json"]
+

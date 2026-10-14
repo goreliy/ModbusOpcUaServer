@@ -35,7 +35,7 @@ pub enum ServiceError {
     Other(String),
 }
 
-/// Create the SCM entry: auto-start, `service run --config <abs path>`.
+/// Create or update our SCM entry: auto-start, `service run --config <abs path>`.
 pub fn install(exe: &Path, config: &Path) -> Result<(), ServiceError> {
     let config = std::path::absolute(config)
         .map_err(|e| ServiceError::Other(format!("cannot absolutize config path: {e}")))?;
@@ -60,7 +60,15 @@ pub fn install(exe: &Path, config: &Path) -> Result<(), ServiceError> {
         account_name: None, // LocalSystem
         account_password: None,
     };
-    let service = manager.create_service(&info, ServiceAccess::CHANGE_CONFIG)?;
+    let service = match manager.create_service(&info, ServiceAccess::CHANGE_CONFIG) {
+        Ok(service) => service,
+        Err(windows_service::Error::Winapi(error)) if error.raw_os_error() == Some(1073) => {
+            let service = manager.open_service(SERVICE_NAME, ServiceAccess::CHANGE_CONFIG)?;
+            service.change_config(&info)?;
+            service
+        }
+        Err(error) => return Err(error.into()),
+    };
     service.set_description(DESCRIPTION)?;
     Ok(())
 }
@@ -154,13 +162,13 @@ fn service_main_inner() -> Result<(), ServiceError> {
         .enable_all()
         .build()
         .map_err(|e| ServiceError::Other(format!("tokio runtime: {e}")))?;
-    let exit = runtime.block_on(crate::run_stack_watched(cfg, config, async move {
+    let exit = runtime.block_on(crate::mcp::run_managed(config, async move {
         let _ = shutdown_rx.await;
     }));
 
     let stopped = ServiceStatus {
         current_state: ServiceState::Stopped,
-        exit_code: ServiceExitCode::Win32(exit.code() as u32),
+        exit_code: ServiceExitCode::Win32(if exit.is_ok() { 0 } else { 2 }),
         controls_accepted: ServiceControlAccept::empty(),
         ..running
     };

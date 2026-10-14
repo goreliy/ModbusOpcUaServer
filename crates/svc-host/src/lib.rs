@@ -8,6 +8,7 @@
 //! - Windows: [`windows`] registers with the SCM; the service entry runs
 //!   [`run_stack`] with an SCM-driven shutdown signal instead of Ctrl+C.
 
+pub mod mcp;
 pub mod stack;
 #[cfg(windows)]
 pub mod windows;

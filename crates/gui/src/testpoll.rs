@@ -79,7 +79,10 @@ fn run(
     let send = |s: String| {
         let _ = tx.send(Msg::Line(s));
     };
-    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
         Ok(rt) => rt,
         Err(e) => {
             send(format!("✗ tokio: {e}"));
@@ -107,16 +110,22 @@ fn run(
             }
             let qty = reg.data_type.register_count().or(reg.length).unwrap_or(1);
             let req = match reg.function {
-                FunctionCode::ReadCoils => ModbusRequest::ReadCoils { addr: reg.address, qty: 1 },
-                FunctionCode::ReadDiscreteInputs => {
-                    ModbusRequest::ReadDiscreteInputs { addr: reg.address, qty: 1 }
-                }
-                FunctionCode::ReadHoldingRegisters => {
-                    ModbusRequest::ReadHoldingRegisters { addr: reg.address, qty }
-                }
-                FunctionCode::ReadInputRegisters => {
-                    ModbusRequest::ReadInputRegisters { addr: reg.address, qty }
-                }
+                FunctionCode::ReadCoils => ModbusRequest::ReadCoils {
+                    addr: reg.address,
+                    qty: 1,
+                },
+                FunctionCode::ReadDiscreteInputs => ModbusRequest::ReadDiscreteInputs {
+                    addr: reg.address,
+                    qty: 1,
+                },
+                FunctionCode::ReadHoldingRegisters => ModbusRequest::ReadHoldingRegisters {
+                    addr: reg.address,
+                    qty,
+                },
+                FunctionCode::ReadInputRegisters => ModbusRequest::ReadInputRegisters {
+                    addr: reg.address,
+                    qty,
+                },
                 FunctionCode::Custom { code } => ModbusRequest::Custom {
                     code,
                     data: parse_hex(reg.custom_request.as_deref().unwrap_or("")),
@@ -130,7 +139,12 @@ fn run(
             match t.request(device.unit_id, &req, timeout).await {
                 Ok(ModbusResponse::Registers(regs)) => {
                     let words: Vec<String> = regs.iter().map(|w| format!("{w:#06x}")).collect();
-                    send(format!("✓ {} @ {}: [{}]", reg.tag, reg.address, words.join(", ")));
+                    send(format!(
+                        "✓ {} @ {}: [{}]",
+                        reg.tag,
+                        reg.address,
+                        words.join(", ")
+                    ));
                 }
                 Ok(ModbusResponse::Bits(bits)) => {
                     send(format!("✓ {} @ {}: {:?}", reg.tag, reg.address, bits));

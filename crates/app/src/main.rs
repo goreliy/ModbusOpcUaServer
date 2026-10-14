@@ -26,6 +26,26 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Persistent shared MCP controller; polling starts through server_start.
+    McpHost {
+        #[arg(short, long)]
+        config: PathBuf,
+    },
+    /// Print paths and ready-to-copy Codex/Claude connection settings.
+    McpInfo {
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+    },
+    /// Check configuration/storage access without starting polling or OPC UA.
+    CheckAccess {
+        #[arg(short, long)]
+        config: PathBuf,
+    },
+    /// MCP over stdio for Codex/Claude: wait for and attach only to the selected config's GUI/server.
+    Mcp {
+        #[arg(short, long)]
+        config: PathBuf,
+    },
     /// Print the build type and runtime limit as JSON without starting services.
     BuildInfo,
     /// Validate a configuration file and print what it resolves to.
@@ -71,6 +91,68 @@ enum ServiceCmd {
 fn main() {
     let cli = Cli::parse();
     let code = match cli.command {
+        Command::McpInfo { config } => match svc_host::mcp::connection_info(
+            &config.unwrap_or_else(svc_host::mcp::default_config_path),
+        ) {
+            Ok(v) => {
+                println!("{}", serde_json::to_string_pretty(&v).unwrap());
+                0
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                2
+            }
+        },
+        Command::McpHost { config } => {
+            let logging = gateway_config::load(&config)
+                .ok()
+                .and_then(|cfg| diag_log::init(&cfg.logging).ok());
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("MCP host runtime");
+            // Detached Windows hosts have no console; Ctrl+C registration can
+            // fail immediately. Their lifecycle is controlled by MCP shutdown.
+            let result = rt.block_on(svc_host::mcp::run_controller(
+                config,
+                std::future::pending(),
+            ));
+            drop(logging);
+            match result {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("MCP host: {e}");
+                    2
+                }
+            }
+        }
+        Command::CheckAccess { config } => match svc_host::mcp::check_access(&config, None) {
+            Ok(result) => {
+                println!("{result}");
+                if result["ok"] == true {
+                    0
+                } else {
+                    2
+                }
+            }
+            Err(error) => {
+                eprintln!("Access check: {error}");
+                2
+            }
+        },
+        Command::Mcp { config } => {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("MCP runtime");
+            match rt.block_on(svc_host::mcp::run_stdio(config)) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("MCP: {e}");
+                    2
+                }
+            }
+        }
         Command::BuildInfo => {
             println!("{}", svc_host::build_info());
             0
@@ -161,7 +243,7 @@ fn run_console(path: &PathBuf) -> i32 {
             return 3;
         }
     };
-    let exit = runtime.block_on(svc_host::run_stack_watched(cfg, path.clone(), async {
+    let exit = runtime.block_on(svc_host::mcp::run_managed(path.clone(), async {
         if let Err(e) = tokio::signal::ctrl_c().await {
             tracing::error!(error = %e, "failed to listen for Ctrl+C");
             std::future::pending::<()>().await;
@@ -169,7 +251,13 @@ fn run_console(path: &PathBuf) -> i32 {
         tracing::info!("Ctrl+C received");
     }));
     let _ = log_setup; // keep the writer alive to the very end
-    exit.code()
+    match exit {
+        Ok(()) => 0,
+        Err(e) => {
+            tracing::error!(error=%e,"managed runtime failed");
+            2
+        }
+    }
 }
 
 fn hash_password() -> i32 {

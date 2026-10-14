@@ -43,9 +43,13 @@ struct TagMeta {
 pub struct EngineHandle {
     shutdown: watch::Sender<bool>,
     task: JoinHandle<()>,
+    calculated: Arc<TypedStore>,
 }
 
 impl EngineHandle {
+    pub fn calculated(&self) -> Arc<TypedStore> {
+        Arc::clone(&self.calculated)
+    }
     /// Signal the pump to stop, wait for it to flush and exit.
     pub async fn shutdown(self) {
         let _ = self.shutdown.send(true);
@@ -202,12 +206,14 @@ impl TagEngine {
     /// Start the pump. Returns the handle and the typed store for phase 3.
     pub fn spawn(self) -> (EngineHandle, Arc<TypedStore>) {
         let store = Arc::clone(&self.store);
+        let calculated = Arc::clone(&self.calculated);
         let (sd_tx, sd_rx) = watch::channel(false);
         let task = tokio::spawn(self.run(sd_rx));
         (
             EngineHandle {
                 shutdown: sd_tx,
                 task,
+                calculated,
             },
             store,
         )

@@ -109,6 +109,8 @@ pub enum ConfigError {
 
     #[error("opcua: {reason}")]
     BadOpcUa { reason: String },
+    #[error("mcp: {reason}")]
+    BadMcp { reason: String },
 
     /// WARNING: with a bind-all `host` and no `advertised_host` the endpoint
     /// URLs advertised in discovery contain 0.0.0.0/:: — clients would
@@ -361,6 +363,7 @@ pub(crate) mod test_util {
             gateway: GatewaySettings::default(),
             opcua: opcua(),
             logging: LoggingConfig::default(),
+            mcp: McpConfig::default(),
             poll_groups,
             channels,
         }

@@ -212,7 +212,10 @@ mod tests {
             assert!(
                 matches!(
                     &e,
-                    ProtoError::Protocol { kind: ProtocolKind::UnexpectedResponse, .. }
+                    ProtoError::Protocol {
+                        kind: ProtocolKind::UnexpectedResponse,
+                        ..
+                    }
                 ),
                 "got {e:?}"
             );
@@ -236,7 +239,10 @@ mod tests {
         let e = expect_bits(vec![true; 8], 10).unwrap_err();
         assert!(matches!(
             &e,
-            ProtoError::Protocol { kind: ProtocolKind::UnexpectedResponse, .. }
+            ProtoError::Protocol {
+                kind: ProtocolKind::UnexpectedResponse,
+                ..
+            }
         ));
         assert!(e.is_fatal());
     }

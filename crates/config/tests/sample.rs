@@ -11,21 +11,42 @@ fn sample_config_loads_validates_and_resolves() {
     let rc = gateway_config::load_str(SAMPLE).expect("sample config must load");
 
     assert_eq!(rc.gateway.instance_name, "demo-gateway");
-    assert!(rc.warnings.is_empty(), "sample must not warn: {:?}", rc.warnings);
+    assert!(
+        rc.warnings.is_empty(),
+        "sample must not warn: {:?}",
+        rc.warnings
+    );
 
     // Structure: rtu (2 devices) + tcp + rtu-over-tcp.
     assert_eq!(rc.channels.len(), 3);
     assert_eq!(rc.poll_groups.len(), 2);
-    assert!(matches!(rc.channels[0].transport, TransportConfig::Rtu { baud: 19200, .. }));
-    assert!(matches!(rc.channels[1].transport, TransportConfig::Tcp { .. }));
-    assert!(matches!(rc.channels[2].transport, TransportConfig::RtuOverTcp { port: 4001, .. }));
-    assert_eq!(rc.channels[0].devices.len(), 2, "two devices share the RTU bus");
+    assert!(matches!(
+        rc.channels[0].transport,
+        TransportConfig::Rtu { baud: 19200, .. }
+    ));
+    assert!(matches!(
+        rc.channels[1].transport,
+        TransportConfig::Tcp { .. }
+    ));
+    assert!(matches!(
+        rc.channels[2].transport,
+        TransportConfig::RtuOverTcp { port: 4001, .. }
+    ));
+    assert_eq!(
+        rc.channels[0].devices.len(),
+        2,
+        "two devices share the RTU bus"
+    );
 
     // Dense tag space, tiled by exclusive contiguous per-channel ranges.
     assert_eq!(rc.tag_count(), 11);
     let mut next = 0u32;
     for ch in &rc.channels {
-        assert_eq!(ch.tag_range.start, next, "channel `{}` range contiguous", ch.name);
+        assert_eq!(
+            ch.tag_range.start, next,
+            "channel `{}` range contiguous",
+            ch.name
+        );
         let n: usize = ch.devices.iter().map(|d| d.registers.len()).sum();
         assert_eq!((ch.tag_range.end - ch.tag_range.start) as usize, n);
         next = ch.tag_range.end;

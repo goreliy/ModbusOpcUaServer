@@ -63,7 +63,9 @@ async fn spawn_server() -> SocketAddr {
             let new_service = new_service.clone();
             async move { accept_tcp_connection(stream, socket_addr, new_service) }
         };
-        let _ = server.serve(&on_connected, |err| eprintln!("server error: {err}")).await;
+        let _ = server
+            .serve(&on_connected, |err| eprintln!("server error: {err}"))
+            .await;
     });
     addr
 }
@@ -104,7 +106,9 @@ async fn spawn_lying_server() -> SocketAddr {
         let on_connected = move |stream, socket_addr| async move {
             accept_tcp_connection(stream, socket_addr, new_service)
         };
-        let _ = server.serve(&on_connected, |err| eprintln!("server error: {err}")).await;
+        let _ = server
+            .serve(&on_connected, |err| eprintln!("server error: {err}"))
+            .await;
     });
     addr
 }
@@ -125,11 +129,21 @@ async fn wrong_length_replies_are_fatal_unexpected_response() {
     // Short register reply (qty-1 words).
     let mut tx = Transport::connect(&cfg).await.expect("connect");
     let err = tx
-        .request(1, &ModbusRequest::ReadHoldingRegisters { addr: 0, qty: 4 }, timeout)
+        .request(
+            1,
+            &ModbusRequest::ReadHoldingRegisters { addr: 0, qty: 4 },
+            timeout,
+        )
         .await
         .expect_err("short register reply must be rejected");
     assert!(
-        matches!(&err, ProtoError::Protocol { kind: ProtocolKind::UnexpectedResponse, .. }),
+        matches!(
+            &err,
+            ProtoError::Protocol {
+                kind: ProtocolKind::UnexpectedResponse,
+                ..
+            }
+        ),
         "got {err:?}"
     );
     assert!(err.is_fatal());
@@ -138,11 +152,21 @@ async fn wrong_length_replies_are_fatal_unexpected_response() {
     // Long register reply (qty+1 words).
     let mut tx = Transport::connect(&cfg).await.expect("connect");
     let err = tx
-        .request(1, &ModbusRequest::ReadInputRegisters { addr: 0, qty: 4 }, timeout)
+        .request(
+            1,
+            &ModbusRequest::ReadInputRegisters { addr: 0, qty: 4 },
+            timeout,
+        )
         .await
         .expect_err("long register reply must be rejected");
     assert!(
-        matches!(&err, ProtoError::Protocol { kind: ProtocolKind::UnexpectedResponse, .. }),
+        matches!(
+            &err,
+            ProtoError::Protocol {
+                kind: ProtocolKind::UnexpectedResponse,
+                ..
+            }
+        ),
         "got {err:?}"
     );
     drop(tx);
@@ -154,7 +178,13 @@ async fn wrong_length_replies_are_fatal_unexpected_response() {
         .await
         .expect_err("short coil reply must be rejected");
     assert!(
-        matches!(&err, ProtoError::Protocol { kind: ProtocolKind::UnexpectedResponse, .. }),
+        matches!(
+            &err,
+            ProtoError::Protocol {
+                kind: ProtocolKind::UnexpectedResponse,
+                ..
+            }
+        ),
         "got {err:?}"
     );
     drop(tx);
@@ -212,7 +242,9 @@ async fn custom_function_round_trips_over_tcp() {
         let on_connected = move |stream, socket_addr| async move {
             accept_tcp_connection(stream, socket_addr, new_service)
         };
-        let _ = server.serve(&on_connected, |err| eprintln!("server error: {err}")).await;
+        let _ = server
+            .serve(&on_connected, |err| eprintln!("server error: {err}"))
+            .await;
     });
 
     let cfg = TransportConfig::Tcp {
@@ -227,7 +259,11 @@ async fn custom_function_round_trips_over_tcp() {
     let resp = tx
         .request(
             1,
-            &ModbusRequest::Custom { code: 0x41, data: vec![1, 2, 3], expect_len: Some(4) },
+            &ModbusRequest::Custom {
+                code: 0x41,
+                data: vec![1, 2, 3],
+                expect_len: Some(4),
+            },
             timeout,
         )
         .await
@@ -242,7 +278,11 @@ async fn custom_function_round_trips_over_tcp() {
     let resp = tx
         .request(
             1,
-            &ModbusRequest::Custom { code: 0x42, data: vec![9], expect_len: Some(10) },
+            &ModbusRequest::Custom {
+                code: 0x42,
+                data: vec![9],
+                expect_len: Some(10),
+            },
             timeout,
         )
         .await
@@ -250,7 +290,11 @@ async fn custom_function_round_trips_over_tcp() {
     match resp {
         ModbusResponse::Raw(bytes) => {
             assert_eq!(bytes.as_ref(), &[9, 0xEE]);
-            assert_ne!(bytes.len(), 10, "poller-side expect_len check would flag this");
+            assert_ne!(
+                bytes.len(),
+                10,
+                "poller-side expect_len check would flag this"
+            );
         }
         other => panic!("expected Raw, got {other:?}"),
     }
@@ -275,7 +319,11 @@ async fn tcp_read_write_and_exception_classification() {
 
     // Read two known holding registers.
     let resp = tx
-        .request(1, &ModbusRequest::ReadHoldingRegisters { addr: 0, qty: 2 }, timeout)
+        .request(
+            1,
+            &ModbusRequest::ReadHoldingRegisters { addr: 0, qty: 2 },
+            timeout,
+        )
         .await
         .expect("read");
     match resp {
@@ -285,12 +333,23 @@ async fn tcp_read_write_and_exception_classification() {
 
     // Write, then read back.
     let resp = tx
-        .request(1, &ModbusRequest::WriteSingleRegister { addr: 0, value: 1600 }, timeout)
+        .request(
+            1,
+            &ModbusRequest::WriteSingleRegister {
+                addr: 0,
+                value: 1600,
+            },
+            timeout,
+        )
         .await
         .expect("write");
     assert!(matches!(resp, ModbusResponse::WriteAck));
     let resp = tx
-        .request(1, &ModbusRequest::ReadHoldingRegisters { addr: 0, qty: 1 }, timeout)
+        .request(
+            1,
+            &ModbusRequest::ReadHoldingRegisters { addr: 0, qty: 1 },
+            timeout,
+        )
         .await
         .expect("read back");
     match resp {
@@ -300,10 +359,17 @@ async fn tcp_read_write_and_exception_classification() {
 
     // Unmapped address -> Modbus exception: tag-scoped, NON-fatal (link healthy).
     let err = tx
-        .request(1, &ModbusRequest::ReadHoldingRegisters { addr: 900, qty: 1 }, timeout)
+        .request(
+            1,
+            &ModbusRequest::ReadHoldingRegisters { addr: 900, qty: 1 },
+            timeout,
+        )
         .await
         .expect_err("exception expected");
-    assert!(matches!(err, ProtoError::Exception(ExceptionCode::IllegalDataAddress)));
+    assert!(matches!(
+        err,
+        ProtoError::Exception(ExceptionCode::IllegalDataAddress)
+    ));
     assert!(!err.is_fatal());
 
     // Unsupported function -> IllegalFunction exception, still non-fatal.
@@ -311,12 +377,19 @@ async fn tcp_read_write_and_exception_classification() {
         .request(1, &ModbusRequest::ReadCoils { addr: 0, qty: 1 }, timeout)
         .await
         .expect_err("exception expected");
-    assert!(matches!(err, ProtoError::Exception(ExceptionCode::IllegalFunction)));
+    assert!(matches!(
+        err,
+        ProtoError::Exception(ExceptionCode::IllegalFunction)
+    ));
     assert!(!err.is_fatal());
 
     // The link is still usable after exceptions.
     let resp = tx
-        .request(1, &ModbusRequest::ReadHoldingRegisters { addr: 1, qty: 1 }, timeout)
+        .request(
+            1,
+            &ModbusRequest::ReadHoldingRegisters { addr: 1, qty: 1 },
+            timeout,
+        )
         .await
         .expect("read after exception");
     assert!(matches!(resp, ModbusResponse::Registers(regs) if regs == vec![237]));

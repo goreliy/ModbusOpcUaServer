@@ -250,12 +250,15 @@ pub fn spawn(
     // host, which `Server::run_with` uses only for endpoint/discovery URLs,
     // never for the socket (that is what plain `run()` would have done).
     let bind_addr = format!("{}:{}", opcua_cfg.host, opcua_cfg.port);
-    let server_task = tokio::spawn(async move {
-        let listener = tokio::net::TcpListener::bind(bind_addr.as_str())
-            .await
-            .map_err(|e| format!("OPC UA bind on {bind_addr}: {e}"))?;
-        server.run_with(listener).await.map_err(|e| e.to_string())
-    });
+    let listener = std::net::TcpListener::bind(&bind_addr)
+        .map_err(|e| OpcUaError::Build(format!("OPC UA bind on {bind_addr}: {e}")))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| OpcUaError::Build(e.to_string()))?;
+    let listener = tokio::net::TcpListener::from_std(listener)
+        .map_err(|e| OpcUaError::Build(e.to_string()))?;
+    let server_task =
+        tokio::spawn(async move { server.run_with(listener).await.map_err(|e| e.to_string()) });
 
     tracing::info!(
         host = %opcua_cfg.host,

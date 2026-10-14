@@ -38,7 +38,10 @@ fn client(pki: &std::path::Path) -> opcua::client::Client {
 
 async fn refused<T: opcua::client::transport::Connector + Send + Sync + 'static>(
     res: Result<
-        (Arc<opcua::client::Session>, opcua::client::SessionEventLoop<T>),
+        (
+            Arc<opcua::client::Session>,
+            opcua::client::SessionEventLoop<T>,
+        ),
         opcua::types::Error,
     >,
 ) -> bool {
@@ -49,12 +52,10 @@ async fn refused<T: opcua::client::transport::Connector + Send + Sync + 'static>
             // wait_for_connection resolves `false` once the retry budget is
             // exhausted; a hang beyond 10s counts as refused too. NEVER call
             // disconnect() on a session that did not connect — it hangs.
-            let connected = tokio::time::timeout(
-                Duration::from_secs(10),
-                session.wait_for_connection(),
-            )
-            .await
-            .unwrap_or(false);
+            let connected =
+                tokio::time::timeout(Duration::from_secs(10), session.wait_for_connection())
+                    .await
+                    .unwrap_or(false);
             handle.abort();
             !connected
         }
@@ -142,7 +143,10 @@ async fn username_password_sessions_with_argon2_hash() {
     )
     .await
     .expect("connect attempt timed out");
-    assert!(refused(res).await, "wrong password must not produce a session");
+    assert!(
+        refused(res).await,
+        "wrong password must not produce a session"
+    );
 
     // Anonymous: refused too (allow_anonymous = false).
     let res = tokio::time::timeout(
@@ -159,7 +163,10 @@ async fn username_password_sessions_with_argon2_hash() {
     )
     .await
     .expect("connect attempt timed out");
-    assert!(refused(res).await, "anonymous must be refused when allow_anonymous=false");
+    assert!(
+        refused(res).await,
+        "anonymous must be refused when allow_anonymous=false"
+    );
 
     opcua.shutdown().await;
     engine_handle.shutdown().await;

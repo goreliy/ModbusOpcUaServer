@@ -12,9 +12,38 @@ pub struct ConfigV1 {
     pub opcua: OpcUaConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
     /// Named poll groups, referenced by registers.
     pub poll_groups: Vec<PollGroupConfig>,
     pub channels: Vec<ChannelConfig>,
+}
+
+/// Local management endpoint. Authentication is stored in a sidecar file,
+/// never in the public JSON configuration or MCP results.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpConfig {
+    #[serde(default = "d_true")]
+    pub enabled: bool,
+    #[serde(default = "d_mcp_host")]
+    pub host: String,
+    #[serde(default = "d_mcp_port")]
+    pub port: u16,
+}
+fn d_mcp_host() -> String {
+    "127.0.0.1".into()
+}
+fn d_mcp_port() -> u16 {
+    14840
+}
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            host: d_mcp_host(),
+            port: d_mcp_port(),
+        }
+    }
 }
 
 /// Application logging. Console output is always on (under systemd it lands

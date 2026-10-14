@@ -15,6 +15,9 @@
 /logs/
 /pki/
 *.log
+*.mcp-endpoint.json
+*.mcp-owner.lock
+*.json.bak
 
 # --- Generated distribution packages ---
 # Linux packages are rebuilt on demand (installers/linux/*.sh, see

@@ -38,8 +38,9 @@ async fn run_load(
     for _ in 0..channels_n {
         let mut units = HashMap::new();
         for unit in 1..=devices_per_channel as u8 {
-            let regs: HashMap<u16, u16> =
-                (0..tags_per_device as u16).map(|a| (a, a.wrapping_add(100))).collect();
+            let regs: HashMap<u16, u16> = (0..tags_per_device as u16)
+                .map(|a| (a, a.wrapping_add(100)))
+                .collect();
             units.insert(unit, regs);
         }
         let banks: Banks = Arc::new(Mutex::new(units));
@@ -113,7 +114,10 @@ async fn run_load(
     let mut timeouts = 0u64;
     let mut reconnects = 0u64;
     for ci in 0..channels_n {
-        let m = handle.metrics(ChannelId(ci as u16)).expect("metrics").snapshot();
+        let m = handle
+            .metrics(ChannelId(ci as u16))
+            .expect("metrics")
+            .snapshot();
         reqs_ok += m.reqs_ok;
         timeouts += m.timeouts;
         reconnects += m.reconnects;
@@ -153,7 +157,10 @@ async fn run_load(
     tokio::time::timeout(Duration::from_secs(20), handle.shutdown())
         .await
         .expect("shutdown joins all channel tasks");
-    println!("shutdown of {channels_n} channels took {:?}", shut_started.elapsed());
+    println!(
+        "shutdown of {channels_n} channels took {:?}",
+        shut_started.elapsed()
+    );
     for s in servers {
         s.abort();
     }

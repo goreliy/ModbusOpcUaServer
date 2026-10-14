@@ -21,7 +21,10 @@ fn example_config_survives_gui_save_cycle() {
 
     // «Сохранение» из GUI.
     let saved = serde_json::to_string_pretty(&file).expect("serialize");
-    assert!(saved.contains("\"schema_version\": \"1\""), "версия схемы на месте");
+    assert!(
+        saved.contains("\"schema_version\": \"1\""),
+        "версия схемы на месте"
+    );
 
     // Сервер загружает то, что сохранил GUI.
     let resolved = gateway_config::load_str(&saved).expect("server loads GUI-saved config");

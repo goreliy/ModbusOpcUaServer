@@ -222,7 +222,10 @@ mod tests {
         assert!(rt.is_online());
         assert!(!rt.on_comm_failure());
         assert!(!rt.on_comm_failure());
-        assert!(rt.on_comm_failure(), "third failure crosses offline_after=3");
+        assert!(
+            rt.on_comm_failure(),
+            "third failure crosses offline_after=3"
+        );
         assert!(!rt.is_online());
         // Further failures never re-report the crossing.
         assert!(!rt.on_comm_failure());
@@ -312,7 +315,10 @@ mod tests {
     fn exception_reply_revives_offline_device() {
         let mut rt = DeviceRuntime::new(2, retry(10_000, 60_000));
         assert!(!rt.on_comm_failure());
-        assert!(rt.on_comm_failure(), "second failure crosses offline_after=2");
+        assert!(
+            rt.on_comm_failure(),
+            "second failure crosses offline_after=2"
+        );
         rt.on_comm_failure(); // failed probe: escalate
         assert!(!rt.is_online());
         assert!(rt.is_offline_and_not_due_to_probe());
@@ -344,7 +350,10 @@ mod tests {
         assert!(rt.effective_txns(0, 0).is_none());
         let split = rt.handle_exception(0, 0, &txn, ExceptionCode::IllegalDataAddress, &sink);
         assert!(split);
-        assert!(sink.quality_calls().is_empty(), "split does not mark tags Bad");
+        assert!(
+            sink.quality_calls().is_empty(),
+            "split does not mark tags Bad"
+        );
 
         let subs = rt.effective_txns(0, 0).expect("override remembered");
         assert_eq!(subs.len(), 2);
@@ -371,7 +380,10 @@ mod tests {
         // tags degrade Bad instead.
         let split = rt.handle_exception(0, 0, &txn, ExceptionCode::IllegalDataAddress, &sink);
         assert!(!split);
-        assert_eq!(sink.quality_calls(), vec![(vec![TagId(0), TagId(1)], Quality::Bad)]);
+        assert_eq!(
+            sink.quality_calls(),
+            vec![(vec![TagId(0), TagId(1)], Quality::Bad)]
+        );
     }
 
     #[test]

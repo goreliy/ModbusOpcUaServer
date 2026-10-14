@@ -66,7 +66,9 @@ async fn spawn_rtu_tunnel() -> SocketAddr {
             let new_service = new_service.clone();
             async move { accept_tcp_connection(stream, socket_addr, new_service) }
         };
-        let _ = server.serve(&on_connected, |err| eprintln!("tunnel error: {err}")).await;
+        let _ = server
+            .serve(&on_connected, |err| eprintln!("tunnel error: {err}"))
+            .await;
     });
     addr
 }
@@ -82,14 +84,21 @@ async fn rtu_over_tcp_round_trip() {
 
     let mut tx = Transport::connect(&cfg).await.expect("connect");
     assert_eq!(tx.kind(), Kind::RtuOverTcp);
-    assert!(tx.is_half_duplex(), "RTU-over-TCP tunnels a half-duplex bus");
+    assert!(
+        tx.is_half_duplex(),
+        "RTU-over-TCP tunnels a half-duplex bus"
+    );
 
     let timeout = Duration::from_secs(2);
 
     // Canned ReadHoldingRegisters exchange over raw RTU framing (CRC verified
     // by the server-side codec; response CRC verified by the client codec).
     let resp = tx
-        .request(7, &ModbusRequest::ReadHoldingRegisters { addr: 100, qty: 2 }, timeout)
+        .request(
+            7,
+            &ModbusRequest::ReadHoldingRegisters { addr: 100, qty: 2 },
+            timeout,
+        )
         .await
         .expect("rtu-over-tcp read");
     match resp {
@@ -99,17 +108,31 @@ async fn rtu_over_tcp_round_trip() {
 
     // A second exchange on the same connection (framing stayed in sync).
     let resp = tx
-        .request(7, &ModbusRequest::WriteSingleRegister { addr: 100, value: 5 }, timeout)
+        .request(
+            7,
+            &ModbusRequest::WriteSingleRegister {
+                addr: 100,
+                value: 5,
+            },
+            timeout,
+        )
         .await
         .expect("rtu-over-tcp write");
     assert!(matches!(resp, ModbusResponse::WriteAck));
 
     // Exception classification survives the RTU framing too.
     let err = tx
-        .request(7, &ModbusRequest::ReadHoldingRegisters { addr: 9000, qty: 1 }, timeout)
+        .request(
+            7,
+            &ModbusRequest::ReadHoldingRegisters { addr: 9000, qty: 1 },
+            timeout,
+        )
         .await
         .expect_err("exception expected");
-    assert!(matches!(err, ProtoError::Exception(ExceptionCode::IllegalDataAddress)));
+    assert!(matches!(
+        err,
+        ProtoError::Exception(ExceptionCode::IllegalDataAddress)
+    ));
     assert!(!err.is_fatal());
 
     tx.disconnect().await.expect("disconnect");
@@ -148,7 +171,9 @@ async fn rtu_over_tcp_short_register_reply_is_fatal() {
         let on_connected = move |stream, socket_addr| async move {
             accept_tcp_connection(stream, socket_addr, new_service)
         };
-        let _ = server.serve(&on_connected, |err| eprintln!("tunnel error: {err}")).await;
+        let _ = server
+            .serve(&on_connected, |err| eprintln!("tunnel error: {err}"))
+            .await;
     });
 
     let cfg = TransportConfig::RtuOverTcp {
@@ -158,11 +183,21 @@ async fn rtu_over_tcp_short_register_reply_is_fatal() {
     };
     let mut tx = Transport::connect(&cfg).await.expect("connect");
     let err = tx
-        .request(7, &ModbusRequest::ReadHoldingRegisters { addr: 0, qty: 4 }, Duration::from_secs(2))
+        .request(
+            7,
+            &ModbusRequest::ReadHoldingRegisters { addr: 0, qty: 4 },
+            Duration::from_secs(2),
+        )
         .await
         .expect_err("short reply must be rejected");
     assert!(
-        matches!(&err, ProtoError::Protocol { kind: ProtocolKind::UnexpectedResponse, .. }),
+        matches!(
+            &err,
+            ProtoError::Protocol {
+                kind: ProtocolKind::UnexpectedResponse,
+                ..
+            }
+        ),
         "got {err:?}"
     );
     assert!(err.is_fatal());

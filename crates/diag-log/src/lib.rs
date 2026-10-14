@@ -38,10 +38,7 @@ pub struct LogSetup {
 #[derive(Debug, thiserror::Error)]
 pub enum LogInitError {
     #[error("cannot create log dir {dir}: {source}")]
-    Dir {
-        dir: String,
-        source: std::io::Error,
-    },
+    Dir { dir: String, source: std::io::Error },
     #[error("logging already initialized")]
     AlreadyInit,
 }

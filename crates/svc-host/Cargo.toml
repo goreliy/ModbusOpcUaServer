@@ -14,11 +14,23 @@ mb-poller = { path = "../mb-poller" }
 tags-core = { path = "../tags-core" }
 opcua-gateway = { path = "../opcua-gateway" }
 diag-log = { path = "../diag-log" }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync", "io-std", "io-util"] }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
 mb-types = { workspace = true }
+mb-proto = { workspace = true }
+parking_lot = { workspace = true }
+axum = "0.8.9"
+sha2 = "0.10"
+getrandom = "0.3"
+tempfile = "3"
+fs2 = "0.4"
+bytes = { workspace = true }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
@@ -27,3 +39,4 @@ tokio-modbus = { version = "0.17", default-features = false, features = ["tcp", 
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }

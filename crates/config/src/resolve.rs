@@ -6,7 +6,9 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
-use mb_types::{ByteOrder, ChannelId, DataType, DeviceId, FunctionCode, PollGroupId, TagId, WordOrder};
+use mb_types::{
+    ByteOrder, ChannelId, DataType, DeviceId, FunctionCode, PollGroupId, TagId, WordOrder,
+};
 
 use crate::schema::v1::{
     ConfigV1, GatewaySettings, LoggingConfig, OpcUaConfig, RetryConfig, TransportConfig,
@@ -21,6 +23,7 @@ pub struct ResolvedConfig {
     /// OPC UA server settings (verbatim from the schema — nothing to intern).
     pub opcua: OpcUaConfig,
     pub logging: LoggingConfig,
+    pub mcp: crate::schema::v1::McpConfig,
     pub poll_groups: Vec<ResolvedPollGroup>,
     pub channels: Vec<ResolvedChannel>,
     /// Index = `TagId.0`; dense and contiguous from 0.
@@ -229,6 +232,7 @@ pub fn resolve(cfg: ConfigV1, warnings: Vec<ConfigError>) -> ResolvedConfig {
         gateway: cfg.gateway,
         opcua: cfg.opcua,
         logging: cfg.logging,
+        mcp: cfg.mcp,
         poll_groups,
         channels,
         tag_names,
@@ -261,7 +265,11 @@ mod tests {
 
         let mut tcp = tcp_channel(
             "plc",
-            vec![device("d3", 1, vec![entry("b.one", FC::ReadInputRegisters, 5, DT::I16)])],
+            vec![device(
+                "d3",
+                1,
+                vec![entry("b.one", FC::ReadInputRegisters, 5, DT::I16)],
+            )],
         );
         tcp.max_inflight = 4;
 
@@ -402,7 +410,13 @@ mod tests {
         let mut c = two_channel_config();
         c.channels[1].devices[0].registers[0].poll_group = "slow".into();
         let rc = resolve(c, vec![]);
-        assert_eq!(rc.channels[1].devices[0].registers[0].poll_group, PollGroupId(1));
-        assert_eq!(rc.channels[0].devices[0].registers[0].poll_group, PollGroupId(0));
+        assert_eq!(
+            rc.channels[1].devices[0].registers[0].poll_group,
+            PollGroupId(1)
+        );
+        assert_eq!(
+            rc.channels[0].devices[0].registers[0].poll_group,
+            PollGroupId(0)
+        );
     }
 }

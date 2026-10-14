@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// channel task (writer) and [`crate::PollerHandle`] (reader).
 #[derive(Debug, Default)]
 pub struct ChannelMetrics {
+    pub connected: std::sync::atomic::AtomicBool,
+    pub last_error: parking_lot::RwLock<Option<String>>,
     /// Wire requests answered successfully (per attempt, reads + writes).
     pub reqs_ok: AtomicU64,
     /// Wire requests that errored (per attempt; superset of the below).

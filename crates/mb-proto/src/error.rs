@@ -93,9 +93,7 @@ pub fn flatten<T>(r: tokio_modbus::Result<T>) -> Result<T, ProtoError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio_modbus::{
-        Error as TmErr, FunctionCode as TmFc, ProtocolError, Response,
-    };
+    use tokio_modbus::{Error as TmErr, FunctionCode as TmFc, ProtocolError, Response};
 
     #[test]
     fn flatten_ok_passes_value_through() {
@@ -134,7 +132,10 @@ mod tests {
         match &e {
             ProtoError::Protocol { kind, detail } => {
                 assert_eq!(*kind, ProtocolKind::FunctionCodeMismatch);
-                assert!(!detail.is_empty(), "detail carries the tokio-modbus message");
+                assert!(
+                    !detail.is_empty(),
+                    "detail carries the tokio-modbus message"
+                );
             }
             other => panic!("expected Protocol, got {other:?}"),
         }

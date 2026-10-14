@@ -16,6 +16,154 @@ use tracing_subscriber::Layer;
 use gateway_config::ResolvedConfig;
 use svc_host::{start_stack, RunningStack, StackExit};
 
+pub enum GuiStack {
+    Local(Box<RunningStack>),
+    Managed(Arc<svc_host::mcp::Controller>),
+    Remote(Arc<crate::remote::Remote>),
+    Empty,
+}
+impl GuiStack {
+    pub fn config_revisions(&self) -> (Option<String>, Option<String>) {
+        let view = match self {
+            Self::Managed(c) => c.view(),
+            Self::Remote(c) => c.view(),
+            _ => return (None, None),
+        };
+        (view.saved_revision, view.applied_revision)
+    }
+    pub fn is_running(&self) -> bool {
+        match self {
+            Self::Local(_) => true,
+            Self::Managed(c) => c.view().running,
+            Self::Remote(c) => c.view().running,
+            Self::Empty => false,
+        }
+    }
+    pub fn mcp_url(&self) -> Option<String> {
+        match self {
+            Self::Managed(c) => c.url(),
+            Self::Remote(c) => Some(c.url()),
+            _ => None,
+        }
+    }
+    pub fn mcp_clients(&self) -> Vec<svc_host::mcp::McpClientView> {
+        match self {
+            Self::Managed(c) => c.client_views(),
+            Self::Remote(c) => c.view().mcp_clients,
+            _ => vec![],
+        }
+    }
+    pub fn revision(&self) -> u64 {
+        match self {
+            Self::Local(s) => s.revision(),
+            Self::Managed(c) => c.view().revision,
+            Self::Remote(c) => c.view().revision,
+            Self::Empty => 0,
+        }
+    }
+    pub fn typed(&self) -> Arc<tags_core::TypedStore> {
+        match self {
+            Self::Local(s) => s.typed(),
+            Self::Managed(c) => c.view().typed.unwrap_or_else(|| {
+                Arc::new(tags_core::TypedStore::from_names(std::iter::empty::<&str>()))
+            }),
+            Self::Remote(c) => c.view().typed.unwrap_or_else(|| {
+                Arc::new(tags_core::TypedStore::from_names(std::iter::empty::<&str>()))
+            }),
+            Self::Empty => Arc::new(tags_core::TypedStore::from_names(std::iter::empty::<&str>())),
+        }
+    }
+    pub fn channel_metrics(&self) -> Vec<(String, Arc<mb_poller::ChannelMetrics>)> {
+        match self {
+            Self::Local(s) => s.channel_metrics(),
+            Self::Managed(c) => c.view().metrics,
+            Self::Remote(c) => c.view().metrics,
+            Self::Empty => vec![],
+        }
+    }
+    pub fn endpoint_url(&self) -> Option<String> {
+        match self {
+            Self::Local(s) => s.endpoint_url(),
+            Self::Managed(c) => c.view().endpoint,
+            Self::Remote(c) => c.view().endpoint,
+            Self::Empty => None,
+        }
+    }
+    pub fn trial_remaining(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::Local(s) => s.trial_remaining(),
+            Self::Managed(c) => c.view().trial_remaining,
+            Self::Remote(c) => c.view().trial_remaining,
+            Self::Empty => None,
+        }
+    }
+    pub fn trial_expired(&self) -> bool {
+        self.trial_remaining().is_some_and(|r| r.is_zero())
+    }
+    pub fn opcua(&self) -> Option<svc_host::mcp::OpcUaView> {
+        match self {
+            Self::Local(s) => s.opcua().map(|o| svc_host::mcp::OpcUaView {
+                sessions: o.session_count(),
+                authentications: o.recent_authentications(),
+            }),
+            Self::Managed(c) => c.view().opcua,
+            Self::Remote(c) => c.view().opcua,
+            Self::Empty => None,
+        }
+    }
+    pub async fn reload(
+        &mut self,
+        cfg: ResolvedConfig,
+        path: Option<std::path::PathBuf>,
+    ) -> Result<(), String> {
+        match self {
+            Self::Local(s) => s.reload(cfg).await?,
+            Self::Managed(c) => return c.reload_file().await,
+            Self::Remote(c) => return c.reload().await,
+            Self::Empty => return Err("runtime unavailable".into()),
+        }
+        if let Some(path) = path {
+            let c = svc_host::mcp::Controller::new(path).await?;
+            if let Self::Local(s) = std::mem::replace(self, Self::Empty) {
+                if let Err(e) = c.adopt(*s).await {
+                    c.shutdown().await;
+                    return Err(e);
+                }
+                *self = Self::Managed(c);
+            }
+        }
+        Ok(())
+    }
+    pub async fn shutdown(self) {
+        match self {
+            Self::Local(s) => s.shutdown().await,
+            Self::Managed(c) => c.shutdown().await,
+            Self::Remote(c) => c.detach().await,
+            Self::Empty => {}
+        }
+    }
+}
+
+async fn attach_controller(path: std::path::PathBuf) -> Result<GuiStack, String> {
+    let resume = svc_host::mcp::previous_runtime_was_running(&path)
+        && !svc_host::mcp::shutdown_was_requested(&path);
+    match svc_host::mcp::Controller::new(&path).await {
+        Ok(controller) => {
+            if resume {
+                if let Err(error) = controller.start_server().await {
+                    controller.shutdown().await;
+                    return Err(error);
+                }
+            }
+            Ok(GuiStack::Managed(controller))
+        }
+        Err(error) if error == svc_host::mcp::OWNER_BUSY => crate::remote::Remote::connect(path)
+            .await
+            .map(GuiStack::Remote),
+        Err(error) => Err(error),
+    }
+}
+
 /// Кольцевой буфер строк лога, который наполняет tracing-слой и читает окно.
 pub type LogBuffer = Arc<Mutex<VecDeque<String>>>;
 const LOG_CAP: usize = 500;
@@ -82,10 +230,10 @@ impl tracing::field::Visit for MsgVisitor {
 
 /// Сообщение из фонового потока запуска/останова в UI.
 enum Ev {
-    Started(Box<RunningStack>, Instant),
+    Started(Box<GuiStack>, Instant),
     StartFailed(String),
     Stopped,
-    Reloaded(Box<RunningStack>, Instant, Result<(), String>),
+    Reloaded(Box<GuiStack>, Instant, Result<(), String>),
 }
 
 /// Состояние встроенного сервера в окне.
@@ -93,7 +241,7 @@ pub enum ServerState {
     Stopped,
     Starting,
     Running {
-        stack: Box<RunningStack>,
+        stack: Box<GuiStack>,
         since: Instant,
     },
     Stopping,
@@ -109,6 +257,7 @@ pub struct EmbeddedServer {
     rt: Option<Arc<tokio::runtime::Runtime>>,
     pub last_error: Option<String>,
     watch_path: Option<std::path::PathBuf>,
+    auto_attach: bool,
     seen: Option<Vec<u8>>,
     pending: Option<Vec<u8>>,
     last_check: Instant,
@@ -124,6 +273,7 @@ impl Default for EmbeddedServer {
             rt: None,
             last_error: None,
             watch_path: None,
+            auto_attach: false,
             seen: None,
             pending: None,
             last_check: Instant::now(),
@@ -142,10 +292,62 @@ impl EmbeddedServer {
     }
 
     pub fn is_running(&self) -> bool {
-        matches!(
-            self.state,
-            ServerState::Running { .. } | ServerState::Reloading { .. }
-        )
+        matches!(&self.state,ServerState::Running {stack,..} if stack.is_running())
+            || matches!(self.state, ServerState::Reloading { .. })
+    }
+    pub fn has_mcp(&self) -> bool {
+        matches!(&self.state,ServerState::Running{stack,..} if matches!(**stack,GuiStack::Managed(_)|GuiStack::Remote(_)))
+    }
+    pub fn remote_logs(&self) -> Option<Vec<String>> {
+        match &self.state {
+            ServerState::Running { stack, .. } => match &**stack {
+                GuiStack::Remote(c) => Some(c.logs.read().clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    pub fn attach(&mut self, path: std::path::PathBuf) {
+        self.attach_runtime(path, false);
+    }
+    fn attach_runtime(&mut self, path: std::path::PathBuf, resume: bool) {
+        self.auto_attach = true;
+        self.shutdown_blocking();
+        self.watch_file(Some(path.clone()));
+        self.last_error = None;
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+        let worker = rt.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let ev = worker.block_on(async {
+                match attach_controller(path).await {
+                    Ok(stack) => {
+                        if resume {
+                            let result = match &stack {
+                                GuiStack::Managed(c) => c.start_server().await,
+                                GuiStack::Remote(c) => c.start().await,
+                                _ => unreachable!(),
+                            };
+                            if let Err(error) = result {
+                                stack.shutdown().await;
+                                return Ev::StartFailed(error);
+                            }
+                        }
+                        Ev::Started(Box::new(stack), Instant::now())
+                    }
+                    Err(e) => Ev::StartFailed(e),
+                }
+            });
+            let _ = tx.send(ev);
+        });
+        self.rt = Some(rt);
+        self.rx = Some(rx);
+        self.state = ServerState::Starting;
     }
 
     /// Живые типизированные значения тегов работающего стека (для графиков).
@@ -185,8 +387,9 @@ impl EmbeddedServer {
         };
         self.last_error = None;
         let (tx, rx) = std::sync::mpsc::channel();
+        let path = self.watch_path.clone();
         std::thread::spawn(move || {
-            let result = rt.block_on(stack.reload(cfg));
+            let result = rt.block_on(stack.reload(cfg, path));
             let _ = tx.send(Ev::Reloaded(stack, since, result));
         });
         self.rx = Some(rx);
@@ -201,6 +404,46 @@ impl EmbeddedServer {
     /// Запустить стек из готового ResolvedConfig (валидация/пути уже применены
     /// вызывающим). Поднятие идёт в фоновом потоке — UI не блокируется.
     pub fn start(&mut self, cfg: ResolvedConfig) {
+        if matches!(&self.state, ServerState::Running {stack,..} if matches!(&**stack, GuiStack::Managed(c) if c.is_closed()))
+        {
+            self.shutdown_blocking();
+        }
+        if let ServerState::Running { stack, .. } = &self.state {
+            if let GuiStack::Remote(c) = &**stack {
+                if !c.view().running {
+                    let c = c.clone();
+                    let rt = self.rt.clone().unwrap();
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let stack = match std::mem::replace(&mut self.state, ServerState::Starting) {
+                        ServerState::Running { stack, .. } => stack,
+                        _ => unreachable!(),
+                    };
+                    std::thread::spawn(move || {
+                        let result = rt.block_on(c.start());
+                        let _ = tx.send(Ev::Reloaded(stack, Instant::now(), result));
+                    });
+                    self.rx = Some(rx);
+                }
+                return;
+            }
+            if let GuiStack::Managed(c) = &**stack {
+                if !c.view().running && !c.is_closed() {
+                    let c = Arc::clone(c);
+                    let rt = self.rt.clone().unwrap();
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let stack = match std::mem::replace(&mut self.state, ServerState::Starting) {
+                        ServerState::Running { stack, .. } => stack,
+                        _ => unreachable!(),
+                    };
+                    std::thread::spawn(move || {
+                        let result = rt.block_on(c.start_server());
+                        let _ = tx.send(Ev::Reloaded(stack, Instant::now(), result));
+                    });
+                    self.rx = Some(rx);
+                    return;
+                }
+            }
+        }
         if !matches!(self.state, ServerState::Stopped) {
             return;
         }
@@ -217,10 +460,32 @@ impl EmbeddedServer {
         };
         let (tx, rx) = std::sync::mpsc::channel();
         let rt_thread = Arc::clone(&rt);
+        let path = self.watch_path.clone();
         std::thread::spawn(move || {
             let ev = rt_thread.block_on(async {
+                if let Some(path) = path {
+                    return match attach_controller(path).await {
+                        Ok(stack) => {
+                            let result = match &stack {
+                                GuiStack::Managed(c) => c.start_server().await,
+                                GuiStack::Remote(c) => c.start().await,
+                                _ => unreachable!(),
+                            };
+                            match result {
+                                Ok(()) => Ev::Started(Box::new(stack), Instant::now()),
+                                Err(e) => {
+                                    stack.shutdown().await;
+                                    Ev::StartFailed(e)
+                                }
+                            }
+                        }
+                        Err(e) => Ev::StartFailed(e),
+                    };
+                }
                 match start_stack(cfg).await {
-                    Ok(stack) => Ev::Started(Box::new(stack), Instant::now()),
+                    Ok(stack) => {
+                        Ev::Started(Box::new(GuiStack::Local(Box::new(stack))), Instant::now())
+                    }
                     Err(exit) => Ev::StartFailed(describe_exit(exit)),
                 }
             });
@@ -233,8 +498,8 @@ impl EmbeddedServer {
 
     /// Остановить стек (в фоне, через свой рантайм).
     pub fn stop(&mut self) {
-        let stack = match std::mem::replace(&mut self.state, ServerState::Stopping) {
-            ServerState::Running { stack, .. } => stack,
+        let (stack, since) = match std::mem::replace(&mut self.state, ServerState::Stopping) {
+            ServerState::Running { stack, since } => (stack, since),
             other => {
                 self.state = other;
                 return;
@@ -246,6 +511,16 @@ impl EmbeddedServer {
         };
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
+            if let GuiStack::Remote(c) = &*stack {
+                let result = rt.block_on(c.stop());
+                let _ = tx.send(Ev::Reloaded(stack, since, result));
+                return;
+            }
+            if let GuiStack::Managed(c) = &*stack {
+                rt.block_on(c.stop_server());
+                let _ = tx.send(Ev::Reloaded(stack, since, Ok(())));
+                return;
+            }
             rt.block_on(async move { stack.shutdown().await });
             let _ = tx.send(Ev::Stopped);
         });
@@ -254,6 +529,38 @@ impl EmbeddedServer {
 
     /// Обработать события фонового потока; true — состояние изменилось.
     pub fn pump(&mut self) -> bool {
+        let lost = match &self.state {
+            ServerState::Running { stack, .. } => match &**stack {
+                GuiStack::Managed(c) => c.is_closed(),
+                GuiStack::Remote(c) => !c.is_connected(),
+                _ => false,
+            },
+            _ => false,
+        };
+        let retry = matches!(&self.state, ServerState::Stopped)
+            && self.last_check.elapsed() >= std::time::Duration::from_secs(2);
+        if (lost || retry) && self.watch_path.is_some() {
+            let path = self.watch_path.clone().unwrap();
+            if svc_host::mcp::shutdown_was_requested(&path) {
+                self.shutdown_blocking();
+                self.auto_attach = false;
+                self.last_error=Some("Контроллер завершён командой MCP. Запустите сервер для повторного подключения.".into());
+                return true;
+            }
+            let remembered = matches!(&self.state,ServerState::Running{stack,..} if matches!(&**stack,GuiStack::Remote(c) if c.running_before_disconnect()));
+            let resume = svc_host::mcp::previous_runtime_intent(&path).unwrap_or(remembered);
+            self.last_check = Instant::now();
+            self.attach_runtime(path, resume);
+            return true;
+        }
+        if let ServerState::Running { stack, .. } = &self.state {
+            if let GuiStack::Managed(c) = &**stack {
+                self.last_error = c.view().error;
+            }
+            if let GuiStack::Remote(c) = &**stack {
+                self.last_error = c.view().error;
+            }
+        }
         if matches!(self.state, ServerState::Running { .. })
             && self.last_check.elapsed() >= std::time::Duration::from_millis(250)
         {
@@ -276,7 +583,12 @@ impl EmbeddedServer {
                             self.seen = Some(bytes);
                             self.pending = None;
                             match candidate {
-                                Ok(cfg) => self.reload(cfg),
+                                Ok(cfg) => {
+                                    if !matches!(&self.state,ServerState::Running{stack,..} if matches!(&**stack,GuiStack::Remote(_)|GuiStack::Managed(_)))
+                                    {
+                                        self.reload(cfg);
+                                    }
+                                }
                                 Err(e) => {
                                     self.last_error =
                                         Some(format!("Конфигурация не применена: {e}"))
@@ -376,6 +688,70 @@ mod tests {
             "schema_version":"1", "gateway":{"data_dir":dir.join("data")},
             "opcua":{"enabled":false}, "poll_groups":[{"id":"p","period_ms":period}],"channels":[]
         }).to_string()).unwrap()
+    }
+    #[test]
+    fn gui_attaches_to_mcp_and_closing_gui_preserves_polling() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path,serde_json::json!({"schema_version":"1","gateway":{"data_dir":dir.path().join("data")},"mcp":{"port":0},"opcua":{"enabled":false},"channels":[],"poll_groups":[]}).to_string()).unwrap();
+        let owner_rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let owner = owner_rt
+            .block_on(svc_host::mcp::Controller::new(&path))
+            .unwrap();
+        owner_rt.block_on(owner.start_server()).unwrap();
+        let mut server = EmbeddedServer::default();
+        server.attach(path.clone());
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while !server.has_mcp() {
+            server.pump();
+            assert!(Instant::now() < deadline, "{:?}", server.last_error);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(server.is_running());
+        let remote = match &server.state {
+            ServerState::Running { stack, .. } => match &**stack {
+                GuiStack::Remote(c) => c.clone(),
+                _ => panic!("remote client required"),
+            },
+            _ => unreachable!(),
+        };
+        let rt = server.rt.clone().unwrap();
+        rt.block_on(remote.stop()).unwrap();
+        assert!(!owner.view().running);
+        rt.block_on(remote.start()).unwrap();
+        assert!(owner.view().running);
+        server.shutdown_blocking();
+        drop(rt);
+        assert!(owner.view().running);
+        owner_rt.block_on(owner.shutdown());
+    }
+    #[test]
+    fn gui_owns_selected_controller_without_launching_a_child_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path,serde_json::json!({"schema_version":"1","gateway":{"instance_name":"selected","data_dir":dir.path().join("data")},"mcp":{"port":0},"opcua":{"enabled":false},"channels":[],"poll_groups":[]}).to_string()).unwrap();
+        let mut server = EmbeddedServer::default();
+        server.attach(path.clone());
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while !server.has_mcp() {
+            server.pump();
+            assert!(Instant::now() < deadline, "{:?}", server.last_error);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            matches!(&server.state,ServerState::Running{stack,..} if matches!(&**stack,GuiStack::Managed(_)))
+        );
+        assert!(!server.is_running());
+        let endpoint: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(format!("{}.mcp-endpoint.json", path.display())).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(endpoint["pid"], std::process::id());
+        server.shutdown_blocking();
+        assert!(!std::path::Path::new(&format!("{}.mcp-endpoint.json", path.display())).exists());
     }
     #[test]
     fn save_during_start_queues_the_latest_configuration_and_close_drains_reload() {

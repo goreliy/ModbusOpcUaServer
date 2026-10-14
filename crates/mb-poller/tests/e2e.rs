@@ -71,7 +71,9 @@ async fn coalescing_rates_outage_recovery_shutdown() {
 
     // ---- warm-up: everything Good at least once. ----
     wait_for("all tags initially Good", Duration::from_secs(5), || {
-        ALL_TAGS.iter().all(|t| snap(&cache, t).quality == Quality::Good)
+        ALL_TAGS
+            .iter()
+            .all(|t| snap(&cache, t).quality == Quality::Good)
     })
     .await;
 
@@ -112,22 +114,37 @@ async fn coalescing_rates_outage_recovery_shutdown() {
     // All four fast tags advance in lockstep (published from one response).
     let seqs: Vec<u64> = FAST_TAGS.iter().map(|t| snap(&cache, t).seq).collect();
     let spread = seqs.iter().max().unwrap() - seqs.iter().min().unwrap();
-    assert!(spread <= 1, "coalesced tags must advance together: {seqs:?}");
+    assert!(
+        spread <= 1,
+        "coalesced tags must advance together: {seqs:?}"
+    );
 
     // ---- (c) simulator dies mid-run: Bad sweep, last values kept... ----
     server.abort();
     let _ = (&mut server).await;
-    wait_for("all tags Bad after server death", Duration::from_secs(10), || {
-        ALL_TAGS.iter().all(|t| snap(&cache, t).quality == Quality::Bad)
-    })
+    wait_for(
+        "all tags Bad after server death",
+        Duration::from_secs(10),
+        || {
+            ALL_TAGS
+                .iter()
+                .all(|t| snap(&cache, t).quality == Quality::Bad)
+        },
+    )
     .await;
 
     // ...then a restart on the same port recovers everything to Good.
     let listener = bind(addr).await;
     let server = spawn_server(listener, Arc::clone(&banks));
-    wait_for("recovery to Good after restart", Duration::from_secs(10), || {
-        ALL_TAGS.iter().all(|t| snap(&cache, t).quality == Quality::Good)
-    })
+    wait_for(
+        "recovery to Good after restart",
+        Duration::from_secs(10),
+        || {
+            ALL_TAGS
+                .iter()
+                .all(|t| snap(&cache, t).quality == Quality::Good)
+        },
+    )
     .await;
     assert!(
         metrics.snapshot().reconnects >= 1,

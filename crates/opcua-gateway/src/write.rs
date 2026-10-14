@@ -151,6 +151,16 @@ pub fn build_write_plans(
 }
 
 impl WritePlan {
+    pub fn execute_json(&self, value: serde_json::Value) -> Result<StatusCode, String> {
+        let value = match value {
+            serde_json::Value::Bool(v) => Variant::Boolean(v),
+            serde_json::Value::Number(v) => {
+                Variant::Double(v.as_f64().ok_or("value must be numeric")?)
+            }
+            _ => return Err("value must be a number or boolean".into()),
+        };
+        Ok(self.execute(DataValue::new_now(value)))
+    }
     /// Execute one OPC UA write. Synchronous by contract of the node-manager
     /// callback; internally drives the async Modbus round-trip.
     pub fn execute(&self, dv: DataValue) -> StatusCode {
@@ -169,6 +179,7 @@ impl WritePlan {
         let deadline = Instant::now() + self.wait;
         let (reply_tx, reply_rx) = oneshot::channel();
         let cmd = WriteCommand {
+            diagnostic: None,
             device: self.device,
             req,
             reply: reply_tx,

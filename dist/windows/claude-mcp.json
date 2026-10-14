@@ -1,0 +1,13 @@
+﻿{
+  "mcpServers": {
+    "opc_modbus_demo_cf785a7698ec": {
+      "args": [
+        "mcp",
+        "--config",
+        "C:\\ProgramData\\OPC Modbus Server\\config.json"
+      ],
+      "command": "D:\\123321\\rust opc_ua 20 test\\dist\\windows\\opc-modbus-server.exe",
+      "type": "stdio"
+    }
+  }
+}

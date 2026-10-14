@@ -74,9 +74,7 @@ fn spawn_rtu_server(listener: TcpListener, banks: Banks) -> tokio::task::JoinHan
         let service = RtuMultiSlave { banks };
         let on_connected = move |stream, socket_addr| {
             let service = service.clone();
-            async move {
-                accept_tcp_connection(stream, socket_addr, move |_| Ok(Some(service.clone())))
-            }
+            async move { accept_tcp_connection(stream, socket_addr, move |_| Ok(Some(service.clone()))) }
         };
         let _ = server
             .serve(&on_connected, |err| eprintln!("rtu server error: {err}"))
@@ -90,10 +88,7 @@ fn spawn_rtu_server(listener: TcpListener, banks: Banks) -> tokio::task::JoinHan
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dead_slave_goes_bad_and_healthy_slave_survives_on_half_duplex() {
     // Unit 1 answers; unit 2 has no bank -> never answers (pure timeouts).
-    let banks: Banks = Arc::new(Mutex::new(HashMap::from([(
-        1,
-        HashMap::from([(0, 77)]),
-    )])));
+    let banks: Banks = Arc::new(Mutex::new(HashMap::from([(1, HashMap::from([(0, 77)]))])));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = spawn_rtu_server(listener, Arc::clone(&banks));
@@ -144,11 +139,15 @@ async fn dead_slave_goes_bad_and_healthy_slave_survives_on_half_duplex() {
     // reconnect.) Tags START Bad (never-read), so anchor on the timeouts
     // metric: >= 2 timeouts means the counter really crossed the threshold
     // (the first timeout degrades d.0 Uncertain while still online).
-    wait_for("dead device crosses offline threshold", Duration::from_secs(5), || {
-        metrics.snapshot().timeouts >= 2
-            && snap(&cache, "d.0").quality == Quality::Bad
-            && snap(&cache, "d.1").quality == Quality::Bad
-    })
+    wait_for(
+        "dead device crosses offline threshold",
+        Duration::from_secs(5),
+        || {
+            metrics.snapshot().timeouts >= 2
+                && snap(&cache, "d.0").quality == Quality::Bad
+                && snap(&cache, "d.1").quality == Quality::Bad
+        },
+    )
     .await;
 
     // Steady-state window: probes of the offline device must not lift quality
@@ -163,7 +162,11 @@ async fn dead_slave_goes_bad_and_healthy_slave_survives_on_half_duplex() {
             Quality::Bad,
             "failed probe must never upgrade an offline device's quality (#3)"
         );
-        assert_eq!(snap(&cache, "a.0").quality, Quality::Good, "healthy slave starved (#1)");
+        assert_eq!(
+            snap(&cache, "a.0").quality,
+            Quality::Good,
+            "healthy slave starved (#1)"
+        );
     }
     let alive_delta = snap(&cache, "a.0").seq - alive_seq0;
     assert!(
@@ -227,8 +230,12 @@ async fn expired_write_is_dropped_without_touching_the_device() {
     let (tx, rx) = oneshot::channel();
     writer
         .send(WriteCommand {
+            diagnostic: None,
             device: DeviceId(0),
-            req: ModbusRequest::WriteSingleRegister { addr: 0, value: 9999 },
+            req: ModbusRequest::WriteSingleRegister {
+                addr: 0,
+                value: 9999,
+            },
             reply: tx,
             deadline: Instant::now() - Duration::from_millis(1),
         })
@@ -252,8 +259,12 @@ async fn expired_write_is_dropped_without_touching_the_device() {
     let (tx, rx) = oneshot::channel();
     writer
         .send(WriteCommand {
+            diagnostic: None,
             device: DeviceId(0),
-            req: ModbusRequest::WriteSingleRegister { addr: 0, value: 4242 },
+            req: ModbusRequest::WriteSingleRegister {
+                addr: 0,
+                value: 4242,
+            },
             reply: tx,
             deadline: Instant::now() + Duration::from_secs(60),
         })
@@ -307,6 +318,7 @@ async fn writes_fail_fast_while_disconnected() {
         let (tx, rx) = oneshot::channel();
         writer
             .send(WriteCommand {
+                diagnostic: None,
                 device: DeviceId(0),
                 req: ModbusRequest::WriteSingleRegister { addr: 0, value },
                 reply: tx,

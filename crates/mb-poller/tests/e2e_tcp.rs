@@ -67,7 +67,9 @@ async fn poll_write_die_reconnect_recover() {
 
     // ---- 1. Values land Good (d1.a/d1.b arrive via ONE coalesced read). ----
     wait_for("initial Good values", Duration::from_secs(5), || {
-        good_u16(&cache, "d1.a", 111) && good_u16(&cache, "d1.b", 222) && good_u16(&cache, "d2.a", 333)
+        good_u16(&cache, "d1.a", 111)
+            && good_u16(&cache, "d1.b", 222)
+            && good_u16(&cache, "d2.a", 333)
     })
     .await;
 
@@ -76,8 +78,12 @@ async fn poll_write_die_reconnect_recover() {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     writer
         .send(WriteCommand {
+            diagnostic: None,
             device: DeviceId(0),
-            req: ModbusRequest::WriteSingleRegister { addr: 0, value: 999 },
+            req: ModbusRequest::WriteSingleRegister {
+                addr: 0,
+                value: 999,
+            },
             reply: reply_tx,
             deadline: std::time::Instant::now() + Duration::from_secs(60),
         })
@@ -85,7 +91,11 @@ async fn poll_write_die_reconnect_recover() {
         .expect("write queued");
     let resp = reply_rx.await.expect("reply").expect("write ok");
     assert!(matches!(resp, ModbusResponse::WriteAck));
-    assert_eq!(banks.lock().unwrap()[&1][&0], 999, "write reached the slave");
+    assert_eq!(
+        banks.lock().unwrap()[&1][&0],
+        999,
+        "write reached the slave"
+    );
     wait_for("written value polled back", Duration::from_secs(5), || {
         good_u16(&cache, "d1.a", 999)
     })
@@ -94,20 +104,34 @@ async fn poll_write_die_reconnect_recover() {
     // ---- 3. Kill the server: everything flips Bad, last values retained. ----
     server.abort();
     let _ = (&mut server).await;
-    wait_for("all tags Bad after server death", Duration::from_secs(10), || {
-        TAGS.iter().all(|t| snap(&cache, t).quality == Quality::Bad)
-    })
+    wait_for(
+        "all tags Bad after server death",
+        Duration::from_secs(10),
+        || TAGS.iter().all(|t| snap(&cache, t).quality == Quality::Bad),
+    )
     .await;
     // SCADA convention: show last value + Bad quality, never a fake 0.
-    assert_eq!(snap(&cache, "d1.a").value, RawValue::Registers(vec![999].into()));
-    assert_eq!(snap(&cache, "d2.a").value, RawValue::Registers(vec![333].into()));
+    assert_eq!(
+        snap(&cache, "d1.a").value,
+        RawValue::Registers(vec![999].into())
+    );
+    assert_eq!(
+        snap(&cache, "d2.a").value,
+        RawValue::Registers(vec![333].into())
+    );
 
     // ---- 4. Restart on the same port: reconnect + recovery -> Good again. ----
     let listener = bind(addr).await;
     let server = spawn_server(listener, Arc::clone(&banks));
-    wait_for("recovery to Good after restart", Duration::from_secs(10), || {
-        good_u16(&cache, "d1.a", 999) && good_u16(&cache, "d1.b", 222) && good_u16(&cache, "d2.a", 333)
-    })
+    wait_for(
+        "recovery to Good after restart",
+        Duration::from_secs(10),
+        || {
+            good_u16(&cache, "d1.a", 999)
+                && good_u16(&cache, "d1.b", 222)
+                && good_u16(&cache, "d2.a", 333)
+        },
+    )
     .await;
 
     // ---- 5. Metrics sanity. ----

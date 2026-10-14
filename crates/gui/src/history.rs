@@ -43,7 +43,11 @@ impl History {
         if ring.back().is_some_and(|s| (s.t - t).abs() < 1e-6) {
             return;
         }
-        ring.push_back(Sample { t, v, q: snap.quality });
+        ring.push_back(Sample {
+            t,
+            v,
+            q: snap.quality,
+        });
         if ring.len() > MAX_SAMPLES {
             let drop = ring.len() - MAX_SAMPLES;
             ring.drain(..drop);
@@ -189,7 +193,9 @@ impl ChartWindow {
             .allow_drag(true)
             .allow_scroll(true)
             .x_axis_formatter(move |mark, _range| fmt_rel_time(mark.value - anchor))
-            .label_formatter(move |_name, p| format!("t {}\nзнач {:.4}", fmt_rel_time(p.x - anchor), p.y));
+            .label_formatter(move |_name, p| {
+                format!("t {}\nзнач {:.4}", fmt_rel_time(p.x - anchor), p.y)
+            });
 
         plot.show(ui, |plot_ui| {
             plot_ui.line(

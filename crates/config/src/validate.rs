@@ -64,6 +64,11 @@ pub fn validate(cfg: &ConfigV1) -> Vec<ConfigError> {
     let mut errs = Vec::new();
 
     validate_opcua(&cfg.opcua, &mut errs);
+    if !matches!(cfg.mcp.host.parse::<std::net::IpAddr>(), Ok(ip) if ip.is_loopback()) {
+        errs.push(ConfigError::BadMcp {
+            reason: "host must be a literal loopback IP (127.0.0.1 or ::1)".into(),
+        });
+    }
 
     // Rule 1: unique channel / device / poll_group ids.
     check_unique(

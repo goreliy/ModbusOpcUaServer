@@ -85,7 +85,9 @@ async fn simulator_to_typed_store_end_to_end() {
                     accept_tcp_connection(stream, socket_addr, move |_| Ok(Some(service.clone())))
                 }
             };
-            let _ = server.serve(&on_connected, |err| eprintln!("server error: {err}")).await;
+            let _ = server
+                .serve(&on_connected, |err| eprintln!("server error: {err}"))
+                .await;
         })
     };
 
@@ -135,26 +137,39 @@ async fn simulator_to_typed_store_end_to_end() {
     })
     .await;
 
-    match typed.snapshot(typed.resolve("temp").unwrap()).unwrap().value {
+    match typed
+        .snapshot(typed.resolve("temp").unwrap())
+        .unwrap()
+        .value
+    {
         TypedValue::Float(f) => assert!((f - 23.7).abs() < 1e-9, "temp = {f}"),
         other => panic!("temp: expected Float, got {other:?}"),
     }
     assert_eq!(
-        typed.snapshot(typed.resolve("speed").unwrap()).unwrap().value,
+        typed
+            .snapshot(typed.resolve("speed").unwrap())
+            .unwrap()
+            .value,
         TypedValue::Float(1500.0)
     );
     // Cross-tag: total = raw(5) + a(10).
     wait_for("cross-tag formula", Duration::from_secs(5), || {
-        typed.snapshot(typed.resolve("total").unwrap()).unwrap().value == TypedValue::Float(15.0)
+        typed
+            .snapshot(typed.resolve("total").unwrap())
+            .unwrap()
+            .value
+            == TypedValue::Float(15.0)
     })
     .await;
 
     // Kill the simulator: Bad propagates through to the typed layer,
     // last engineering values retained.
     server.abort();
-    wait_for("typed Bad after server death", Duration::from_secs(10), || {
-        typed.snapshot(TagId(0)).unwrap().quality == Quality::Bad
-    })
+    wait_for(
+        "typed Bad after server death",
+        Duration::from_secs(10),
+        || typed.snapshot(TagId(0)).unwrap().quality == Quality::Bad,
+    )
     .await;
     match typed.snapshot(TagId(0)).unwrap().value {
         TypedValue::Float(f) => assert!((f - 23.7).abs() < 1e-9, "last value kept"),

@@ -101,6 +101,11 @@ pub async fn run_channel(
             Ok(t) => t,
             Err(e) => {
                 tracing::warn!(channel = plan.id.0, error = %e, "channel connect failed");
+                metrics
+                    .connected
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                *metrics.last_error.write() =
+                    Some(format!("Cannot open channel {}: {e}", plan.name));
                 ChannelMetrics::bump(&metrics.reconnects);
                 // Whole channel down: mark every tag of every device Bad AND
                 // notify subscribers (set_device_quality emits a batch) —
@@ -113,13 +118,27 @@ pub async fn run_channel(
                 }
                 // #27: don't let stale writes wait out the outage.
                 fail_pending_writes(&mut writes, &metrics);
-                if backoff_or_stop(&mut backoff_ms, &plan.retry, &mut shutdown, &mut writes, &metrics).await {
+                if backoff_or_stop(
+                    &mut backoff_ms,
+                    &plan.retry,
+                    &mut shutdown,
+                    &mut writes,
+                    &metrics,
+                )
+                .await
+                {
                     return;
                 }
+                metrics
+                    .connected
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
                 continue 'reconnect;
             }
         };
         tracing::info!(channel = plan.id.0, "channel connected");
+        metrics
+            .connected
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         swept = false;
         // #1/#2: DeviceRuntime state (fails / online / probe backoff)
         // deliberately survives the reconnect: a fresh connection says nothing
@@ -149,6 +168,7 @@ pub async fn run_channel(
                 // transaction boundary inside run_tick (#8), never
                 // mid-coalesced-burst -> no RS-485 frame collision.
                 Some(cmd) = writes.recv() => {
+                    let diagnostic = cmd.diagnostic.is_some();
                     let outcome = service_write(
                         cmd, &plan, &dev_index, &mut tx, &mut rt, &*sink, &metrics,
                         &mut consec_timeouts, half_duplex, &mut healthy,
@@ -164,7 +184,25 @@ pub async fn run_channel(
                             if backoff_or_stop(&mut backoff_ms, &plan.retry, &mut shutdown, &mut writes, &metrics).await {
                                 return;
                             }
+                            metrics.connected.store(false,std::sync::atomic::Ordering::Relaxed);
                             continue 'reconnect;
+                        }
+                    }
+                    // A continuous scan must not starve an already-due poll.
+                    if diagnostic {
+                        tokio::select! {
+                            biased;
+                            due = wheel.next_due() => {
+                                if matches!(run_tick(due, &plan, &dev_index, &mut tx, &mut rt, &*sink, &metrics, &mut writes, &shutdown, &mut consec_timeouts, half_duplex, &mut healthy).await, TickOutcome::Reconnect) {
+                                    ChannelMetrics::bump(&metrics.reconnects);
+                                    if healthy { backoff_ms = plan.retry.base_backoff_ms; }
+                                    fail_pending_writes(&mut writes, &metrics);
+                                    if backoff_or_stop(&mut backoff_ms, &plan.retry, &mut shutdown, &mut writes, &metrics).await { return; }
+                                    metrics.connected.store(false,std::sync::atomic::Ordering::Relaxed);
+                            continue 'reconnect;
+                                }
+                            }
+                            _ = std::future::ready(()) => {}
                         }
                     }
                 }
@@ -183,7 +221,8 @@ pub async fn run_channel(
                         if backoff_or_stop(&mut backoff_ms, &plan.retry, &mut shutdown, &mut writes, &metrics).await {
                             return;
                         }
-                        continue 'reconnect;
+                        metrics.connected.store(false,std::sync::atomic::Ordering::Relaxed);
+                            continue 'reconnect;
                     }
                 }
             }
@@ -243,9 +282,18 @@ async fn run_tick(
                 // #9/#15/#31: retry budget and request timeout are the
                 // device-resolved values, not the channel's.
                 let budget = retry_budget(rt[dev_idx].is_online(), &dev.retry);
-                match poll_with_retry(tx, dev, &txn.req, plan, metrics, half_duplex, budget)
-                    .await
-                {
+                let result =
+                    poll_with_retry(tx, dev, &txn.req, plan, metrics, half_duplex, budget).await;
+                *metrics.last_error.write() = result
+                    .as_ref()
+                    .err()
+                    .map(|e| format!("unit {} {:?}: {e}", dev.unit, txn.req));
+                if result.as_ref().is_err_and(|e| e.is_fatal()) {
+                    metrics
+                        .connected
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                }
+                match result {
                     Ok(resp) => {
                         *consec_timeouts = 0;
                         *healthy = true;
@@ -303,8 +351,16 @@ async fn run_tick(
                             inter_request_gap(plan, half_duplex).await;
                             if matches!(
                                 drain_pending_writes(
-                                    plan, dev_index, tx, rt, sink, metrics, writes,
-                                    consec_timeouts, half_duplex, healthy,
+                                    plan,
+                                    dev_index,
+                                    tx,
+                                    rt,
+                                    sink,
+                                    metrics,
+                                    writes,
+                                    consec_timeouts,
+                                    half_duplex,
+                                    healthy,
                                 )
                                 .await,
                                 WriteOutcome::Reconnect
@@ -321,8 +377,16 @@ async fn run_tick(
                 // #8: transaction boundary — service queued operator writes now.
                 if matches!(
                     drain_pending_writes(
-                        plan, dev_index, tx, rt, sink, metrics, writes,
-                        consec_timeouts, half_duplex, healthy,
+                        plan,
+                        dev_index,
+                        tx,
+                        rt,
+                        sink,
+                        metrics,
+                        writes,
+                        consec_timeouts,
+                        half_duplex,
+                        healthy,
                     )
                     .await,
                     WriteOutcome::Reconnect
@@ -426,13 +490,26 @@ async fn drain_pending_writes(
     healthy: &mut bool,
 ) -> WriteOutcome {
     while let Ok(cmd) = writes.try_recv() {
+        let diagnostic = cmd.diagnostic.is_some();
         match service_write(
-            cmd, plan, dev_index, tx, rt, sink, metrics, consec_timeouts, half_duplex, healthy,
+            cmd,
+            plan,
+            dev_index,
+            tx,
+            rt,
+            sink,
+            metrics,
+            consec_timeouts,
+            half_duplex,
+            healthy,
         )
         .await
         {
             WriteOutcome::Reconnect => return WriteOutcome::Reconnect,
             WriteOutcome::Continue => inter_request_gap(plan, half_duplex).await,
+        }
+        if diagnostic {
+            break;
         }
     }
     WriteOutcome::Continue
@@ -463,27 +540,75 @@ async fn service_write(
     // submitter (e.g. the OPC UA write callback) stopped waiting at this same
     // instant and its client already got a timeout; executing late would
     // double-fire the actuator.
-    if Instant::now() > cmd.deadline {
+    if Instant::now() > cmd.deadline || cmd.reply.is_closed() {
         tracing::warn!(device = cmd.device.0, "expired write dropped");
         let _ = cmd.reply.send(Err(ProtoError::Timeout));
         ChannelMetrics::bump(&metrics.writes_err);
         return WriteOutcome::Continue;
     }
+    if let Some(target) = &cmd.diagnostic {
+        if !matches!(
+            cmd.req,
+            ModbusRequest::ReadCoils { .. }
+                | ModbusRequest::ReadDiscreteInputs { .. }
+                | ModbusRequest::ReadHoldingRegisters { .. }
+                | ModbusRequest::ReadInputRegisters { .. }
+        ) {
+            let _ = cmd.reply.send(Err(ProtoError::unexpected_response(
+                "diagnostics only permits standard reads",
+            )));
+            return WriteOutcome::Continue;
+        }
+        let timeout = target
+            .timeout
+            .min(cmd.deadline.saturating_duration_since(Instant::now()));
+        let result = tx.request(target.unit, &cmd.req, timeout).await;
+        let reconnect = result
+            .as_ref()
+            .is_err_and(|e| e.is_fatal() || (half_duplex && matches!(e, ProtoError::Timeout)));
+        match &result {
+            Ok(_) => {
+                ChannelMetrics::bump(&metrics.reqs_ok);
+                *healthy = true;
+                *consec_timeouts = 0;
+            }
+            Err(e) => {
+                ChannelMetrics::bump(&metrics.reqs_err);
+                match e {
+                    ProtoError::Timeout => ChannelMetrics::bump(&metrics.timeouts),
+                    ProtoError::Exception(_) => {
+                        ChannelMetrics::bump(&metrics.exceptions);
+                        *healthy = true;
+                        *consec_timeouts = 0;
+                    }
+                    ProtoError::Protocol { .. } => ChannelMetrics::bump(&metrics.protocol_errors),
+                    _ => {}
+                }
+            }
+        }
+        let _ = cmd.reply.send(result);
+        return if reconnect {
+            WriteOutcome::Reconnect
+        } else {
+            WriteOutcome::Continue
+        };
+    }
     // #14: resolve the write target by identity; an unknown or disabled
     // device gets an explicit error instead of a positional-index gamble.
     let Some(&idx) = dev_index.get(&cmd.device) else {
-        let _ = cmd
-            .reply
-            .send(Err(ProtoError::unexpected_response(format!(
-                "write to unknown or disabled device {}",
-                cmd.device.0
-            ))));
+        let _ = cmd.reply.send(Err(ProtoError::unexpected_response(format!(
+            "write to unknown or disabled device {}",
+            cmd.device.0
+        ))));
         ChannelMetrics::bump(&metrics.writes_err);
         return WriteOutcome::Continue;
     };
     let dev = &plan.devices[idx];
     // #9/#15/#31: writes honor the device-resolved timeout too.
-    let res = tx.request(dev.unit, &cmd.req, dev.request_timeout).await;
+    let timeout = dev
+        .request_timeout
+        .min(cmd.deadline.saturating_duration_since(Instant::now()));
+    let res = tx.request(dev.unit, &cmd.req, timeout).await;
     let outcome = match &res {
         Ok(_) => {
             ChannelMetrics::bump(&metrics.reqs_ok);
@@ -639,7 +764,10 @@ fn scatter(sink: &dyn RawValueSink, txn: &Transaction, resp: ModbusResponse) {
         sink.publish_batch(&updates, ts, mono);
     }
     if !bad.is_empty() {
-        tracing::warn!(tags = bad.len(), "response shorter than plan: tags degraded Bad");
+        tracing::warn!(
+            tags = bad.len(),
+            "response shorter than plan: tags degraded Bad"
+        );
         sink.set_device_quality(&bad, Quality::Bad);
     }
 }
@@ -715,7 +843,11 @@ mod tests {
             fields: vec![field(0, 0, 2), field(1, 2, 1), field(2, 5, 1)],
             coalesced: true,
         };
-        scatter(&sink, &txn, ModbusResponse::Registers(vec![10, 11, 12, 13, 14, 15]));
+        scatter(
+            &sink,
+            &txn,
+            ModbusResponse::Registers(vec![10, 11, 12, 13, 14, 15]),
+        );
 
         let calls = sink.publish_calls();
         assert_eq!(calls.len(), 1, "one publish_batch per transaction");
@@ -766,7 +898,10 @@ mod tests {
         // Short reply: both fields are in range of the 4 returned words,
         // but the total (4 != 6) proves the frame is not ours.
         scatter(&sink, &txn, ModbusResponse::Registers(vec![10, 11, 12, 13]));
-        assert!(sink.publish_calls().is_empty(), "nothing published from a short reply");
+        assert!(
+            sink.publish_calls().is_empty(),
+            "nothing published from a short reply"
+        );
         assert_eq!(
             sink.quality_calls(),
             vec![(vec![TagId(0), TagId(1)], Quality::Bad)]
@@ -795,21 +930,36 @@ mod tests {
     fn scatter_checks_custom_expect_len() {
         let sink = FakeSink::default();
         let txn = Transaction {
-            req: ModbusRequest::Custom { code: 65, data: vec![], expect_len: Some(4) },
+            req: ModbusRequest::Custom {
+                code: 65,
+                data: vec![],
+                expect_len: Some(4),
+            },
             base: 0,
             fields: vec![field(3, 0, 4)],
             coalesced: false,
         };
 
         // Matching length publishes the raw payload.
-        scatter(&sink, &txn, ModbusResponse::Raw(bytes::Bytes::from_static(&[1, 2, 3, 4])));
+        scatter(
+            &sink,
+            &txn,
+            ModbusResponse::Raw(bytes::Bytes::from_static(&[1, 2, 3, 4])),
+        );
         assert_eq!(
             sink.publish_calls(),
-            vec![vec![(TagId(3), RawValue::Raw(bytes::Bytes::from_static(&[1, 2, 3, 4])))]]
+            vec![vec![(
+                TagId(3),
+                RawValue::Raw(bytes::Bytes::from_static(&[1, 2, 3, 4]))
+            )]]
         );
 
         // Length mismatch: nothing published, tag degraded Bad.
-        scatter(&sink, &txn, ModbusResponse::Raw(bytes::Bytes::from_static(&[1, 2])));
+        scatter(
+            &sink,
+            &txn,
+            ModbusResponse::Raw(bytes::Bytes::from_static(&[1, 2])),
+        );
         assert_eq!(sink.publish_calls().len(), 1, "no second publish");
         assert_eq!(sink.quality_calls(), vec![(vec![TagId(3)], Quality::Bad)]);
     }
@@ -858,7 +1008,10 @@ mod tests {
         for ms in [0u64, 1, 2, 500, 30_000] {
             for _ in 0..64 {
                 let j = jitter(ms);
-                assert!(j >= ms / 2 && j <= ms, "jitter({ms}) = {j} out of [ms/2, ms]");
+                assert!(
+                    j >= ms / 2 && j <= ms,
+                    "jitter({ms}) = {j} out of [ms/2, ms]"
+                );
             }
         }
     }

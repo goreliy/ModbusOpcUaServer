@@ -83,8 +83,9 @@ async fn run_simulator(socket_addr: SocketAddr) -> anyhow::Result<()> {
     let listener = TcpListener::bind(socket_addr).await?;
     let server = Server::new(listener);
     let new_service = |_socket_addr| Ok(Some(SimulatedSlave::new()));
-    let on_connected =
-        |stream, socket_addr| async move { accept_tcp_connection(stream, socket_addr, new_service) };
+    let on_connected = |stream, socket_addr| async move {
+        accept_tcp_connection(stream, socket_addr, new_service)
+    };
     let on_process_error = |err| eprintln!("simulator error: {err}");
     server.serve(&on_connected, on_process_error).await?;
     Ok(())
@@ -102,7 +103,10 @@ async fn run_client(socket_addr: SocketAddr) -> anyhow::Result<()> {
     let temperature = raw[1] as f64 * 0.1;
 
     println!("Pump1.Speed (raw {}) -> {} rpm", raw[0], speed);
-    println!("Pump1.Temperature (raw {}) -> {:.1} degC", raw[1], temperature);
+    println!(
+        "Pump1.Temperature (raw {}) -> {:.1} degC",
+        raw[1], temperature
+    );
 
     ctx.disconnect().await?;
     Ok(())

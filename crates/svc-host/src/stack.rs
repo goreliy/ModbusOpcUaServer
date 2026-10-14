@@ -33,6 +33,13 @@ pub enum StackExit {
     OpcUaError,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct StackStartError {
+    pub kind: StackExit,
+    pub message: String,
+}
+
 impl StackExit {
     pub fn code(self) -> i32 {
         match self {
@@ -66,6 +73,64 @@ pub struct RunningStack {
 impl RunningStack {
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    pub fn config(&self) -> &ResolvedConfig {
+        &self.cfg
+    }
+    pub fn calculated(&self) -> Arc<tags_core::TypedStore> {
+        self.engine
+            .as_ref()
+            .map(|e| e.calculated())
+            .unwrap_or_else(|| Arc::clone(&self.typed))
+    }
+    pub fn can_reload(&self, cfg: &ResolvedConfig) -> Result<(), String> {
+        if self.opcua.as_ref().is_some_and(|o| !o.is_running()) {
+            return Err("OPC UA server is not running".into());
+        }
+        if serde_json::to_value(&cfg.opcua).map_err(|e| e.to_string())?
+            != serde_json::to_value(&self.cfg.opcua).map_err(|e| e.to_string())?
+            || serde_json::to_value(&cfg.logging).map_err(|e| e.to_string())?
+                != serde_json::to_value(&self.cfg.logging).map_err(|e| e.to_string())?
+            || cfg.gateway.data_dir != self.cfg.gateway.data_dir
+        {
+            return Err("endpoint/security, logging and data_dir changes need server_stop, config edit and server_start".into());
+        }
+        Ok(())
+    }
+    pub fn uptime_seconds(&self) -> u64 {
+        self.started.elapsed().as_secs()
+    }
+    pub fn writer(
+        &self,
+        channel: mb_types::ChannelId,
+    ) -> Option<tokio::sync::mpsc::Sender<mb_poller::WriteCommand>> {
+        self.poller.as_ref()?.writer(channel)
+    }
+    pub fn history(&self, name: &str) -> Result<Vec<tags_core::StoredValue>, String> {
+        self.persist.load_history(name).map_err(|e| e.to_string())
+    }
+    pub fn write_tag(&self, name: &str, value: serde_json::Value) -> Result<String, String> {
+        if self.cfg.channels.iter().flat_map(|c| &c.devices).any(|d| {
+            d.unit_id == 0
+                && d.registers
+                    .iter()
+                    .any(|r| self.cfg.tag_name(r.tag) == Some(name))
+        }) {
+            return Err("broadcast writes are not permitted through MCP".into());
+        }
+        let writers = self.poller.as_ref().ok_or("poller stopped")?.all_writers();
+        let plans =
+            opcua_gateway::build_write_plans(&self.cfg, &writers).map_err(|e| e.to_string())?;
+        let plan = plans
+            .get(name)
+            .ok_or("tag unknown, disabled or not writable")?;
+        let status = plan.execute_json(value)?;
+        if status.is_good() {
+            Ok(status.to_string())
+        } else {
+            Err(status.to_string())
+        }
     }
 
     /// Prepare the complete new generation before disturbing the old one.
@@ -273,6 +338,10 @@ impl RunningStack {
 /// returned. Must be called inside a multi-thread tokio runtime (the OPC UA
 /// write path uses `block_in_place`).
 pub async fn start_stack(cfg: ResolvedConfig) -> Result<RunningStack, StackExit> {
+    start_stack_detailed(cfg).await.map_err(|e| e.kind)
+}
+
+pub async fn start_stack_detailed(cfg: ResolvedConfig) -> Result<RunningStack, StackStartError> {
     for w in &cfg.warnings {
         tracing::warn!("config: {w}");
     }
@@ -281,13 +350,16 @@ pub async fn start_stack(cfg: ResolvedConfig) -> Result<RunningStack, StackExit>
     let data_dir = PathBuf::from(&cfg.gateway.data_dir);
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
         tracing::error!(dir = %data_dir.display(), error = %e, "cannot create data dir");
-        return Err(StackExit::StorageError);
+        return Err(StackStartError {
+            kind: StackExit::StorageError,
+            message: format!("cannot create data directory {}: {e}", data_dir.display()),
+        });
     }
     let persist = match tags_core::Persist::open(data_dir.join("tags.sled")) {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, "cannot open persistent tag store");
-            return Err(StackExit::StorageError);
+            return Err(StackStartError {kind:StackExit::StorageError,message:format!("cannot open tag storage {}: {e}. Check write permissions and whether another server owns this database",data_dir.join("tags.sled").display())});
         }
     };
 
@@ -303,7 +375,10 @@ pub async fn start_stack(cfg: ResolvedConfig) -> Result<RunningStack, StackExit>
         Ok(e) => e,
         Err(e) => {
             tracing::error!(error = %e, "tag engine failed to start");
-            return Err(StackExit::EngineError);
+            return Err(StackStartError {
+                kind: StackExit::EngineError,
+                message: format!("tag engine failed: {e}"),
+            });
         }
     };
     let poller = mb_poller::Poller::spawn(&cfg, Arc::clone(&cache) as _);
@@ -323,7 +398,10 @@ pub async fn start_stack(cfg: ResolvedConfig) -> Result<RunningStack, StackExit>
                 tracing::error!(error = %e, "OPC UA server failed to start");
                 engine_handle.shutdown().await;
                 poller.shutdown().await;
-                return Err(StackExit::OpcUaError);
+                return Err(StackStartError {
+                    kind: StackExit::OpcUaError,
+                    message: format!("OPC UA startup failed: {e}"),
+                });
             }
         }
     } else {

@@ -15,12 +15,12 @@ use std::time::SystemTime;
 
 use argon2::password_hash::PasswordHash;
 use argon2::{Argon2, PasswordVerifier};
-use parking_lot::Mutex;
 use opcua::server::authenticator::{
     user_pass_security_policy_id, user_pass_security_policy_uri, AuthManager, Password, UserToken,
 };
 use opcua::server::ServerEndpoint;
 use opcua::types::{Error, StatusCode, UAString, UserTokenPolicy, UserTokenType};
+use parking_lot::Mutex;
 
 use gateway_config::schema::v1::OpcUaConfig;
 
@@ -120,7 +120,9 @@ impl GatewayAuthenticator {
     fn verify(&self, username: &str, password: &str) -> bool {
         match self.users.get(username) {
             None => false,
-            Some(Credential::Plain(expected)) => constant_time_eq(expected.as_bytes(), password.as_bytes()),
+            Some(Credential::Plain(expected)) => {
+                constant_time_eq(expected.as_bytes(), password.as_bytes())
+            }
             Some(Credential::Hash(phc)) => match PasswordHash::new(phc) {
                 Ok(parsed) => Argon2::default()
                     .verify_password(password.as_bytes(), &parsed)
@@ -276,8 +278,7 @@ mod tests {
     #[tokio::test]
     async fn successful_authentications_are_recorded_and_capped() {
         use opcua::server::ServerEndpoint;
-        let endpoint =
-            ServerEndpoint::new_none("/", &["ANONYMOUS".to_string(), "op".to_string()]);
+        let endpoint = ServerEndpoint::new_none("/", &["ANONYMOUS".to_string(), "op".to_string()]);
         let a = auth(vec![plain("op", "pw")], true);
         assert!(a.recent_authentications().is_empty());
 

@@ -88,7 +88,12 @@ fn add_gateway_variables(
         let mut address_space = address_space.write();
 
         let folder_id = NodeId::new(ns, "folder");
-        address_space.add_folder(&folder_id, "Gateway", "Gateway", &NodeId::objects_folder_id());
+        address_space.add_folder(
+            &folder_id,
+            "Gateway",
+            "Gateway",
+            &NodeId::objects_folder_id(),
+        );
 
         let _ = address_space.add_variables(
             vec![

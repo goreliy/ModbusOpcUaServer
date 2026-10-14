@@ -11,10 +11,6 @@ fn quote_powershell(path: &Path) -> String {
 
 fn fail(message: &str) -> ! {
     eprintln!("OPC Modbus Server installer error: {message}");
-    eprintln!("Press any key to close this window.");
-    let _ = Command::new("cmd.exe")
-        .args(["/d", "/c", "pause >nul"])
-        .status();
     process::exit(1);
 }
 

@@ -41,7 +41,10 @@ fn value_str(v: &RawValue) -> String {
             .join(","),
         RawValue::Bits(b) => b.iter().map(|x| if *x { '1' } else { '0' }).collect(),
         RawValue::Raw(bytes) => {
-            format!("0x{}", bytes.iter().map(|b| format!("{b:02x}")).collect::<String>())
+            format!(
+                "0x{}",
+                bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            )
         }
         RawValue::Absent => "-".into(),
     }
@@ -172,8 +175,12 @@ async fn main() {
             let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
             writer
                 .send(WriteCommand {
+                    diagnostic: None,
                     device: DeviceId(0),
-                    req: ModbusRequest::WriteSingleRegister { addr: 0, value: 4242 },
+                    req: ModbusRequest::WriteSingleRegister {
+                        addr: 0,
+                        value: 4242,
+                    },
                     reply: reply_tx,
                     deadline: std::time::Instant::now() + Duration::from_secs(60),
                 })
@@ -190,8 +197,14 @@ async fn main() {
     println!(
         "final channel metrics: reqs_ok={} reqs_err={} timeouts={} exceptions={} \
          protocol_errors={} reconnects={} writes_ok={} writes_err={}",
-        m.reqs_ok, m.reqs_err, m.timeouts, m.exceptions,
-        m.protocol_errors, m.reconnects, m.writes_ok, m.writes_err
+        m.reqs_ok,
+        m.reqs_err,
+        m.timeouts,
+        m.exceptions,
+        m.protocol_errors,
+        m.reconnects,
+        m.writes_ok,
+        m.writes_err
     );
     println!("total change batches: {batches}");
 

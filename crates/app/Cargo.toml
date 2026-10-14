@@ -23,6 +23,7 @@ opcua-gateway = { path = "../opcua-gateway" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 tracing = { workspace = true }
 clap = { version = "4", features = ["derive"] }
+serde_json = { workspace = true }
 
 # .deb (cargo-deb, собирается на Linux): cargo deb -p app
 # Ставит бинарь в /usr/bin, пример конфига в /etc, systemd-unit в /lib/systemd.

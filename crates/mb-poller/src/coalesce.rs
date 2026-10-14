@@ -212,7 +212,12 @@ mod tests {
                 .map(|(i, (s, w))| iv(*s, *w, i as u32))
                 .collect();
             let txns = coalesce(c.area, ivals, Caps { max_gap: c.max_gap });
-            assert_eq!(txns.len(), c.expected.len(), "{}: transaction count", c.name);
+            assert_eq!(
+                txns.len(),
+                c.expected.len(),
+                "{}: transaction count",
+                c.name
+            );
             for (t, (addr, qty, offsets)) in txns.iter().zip(&c.expected) {
                 assert_eq!(addr_qty(&t.req), (*addr, *qty), "{}: addr/qty", c.name);
                 assert_eq!(t.base, *addr, "{}: base", c.name);

@@ -32,7 +32,10 @@ impl PollWheel {
 
         let mut due_map: Vec<Vec<Entry>> = vec![Vec::new(); periods.len()];
         for (group_idx, (_, period)) in plan.groups.iter().enumerate() {
-            let slot = periods.iter().position(|p| p == period).expect("own period");
+            let slot = periods
+                .iter()
+                .position(|p| p == period)
+                .expect("own period");
             let prio = plan.group_priorities[group_idx];
             for (device_idx, dev) in plan.devices.iter().enumerate() {
                 if !dev.by_group[group_idx].1.is_empty() {

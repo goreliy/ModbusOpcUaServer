@@ -1,4 +1,5 @@
 ﻿{
+    "mcp_documentation":  "docs/MCP.md",
     "package_version":  "0.1.0-full",
     "server":  {
                    "arch":  "x86_64",
@@ -17,7 +18,7 @@
                          "version":  "0.1.0"
                      },
     "sha256":  {
-                   "server":  "436DE23E3332F4B64BCC09AAE87C30A68134A336D2A65618D52E4BF4D6734A37",
-                   "configurator":  "1C437B62BF9D4D4BB20EC196D433C1894C049E3057B38A6D216256BA8EB958C3"
+                   "server":  "20BDCF775AF70D557B819C4B8C9B4D64BD82480D0CF0CDAD1256C8432C074E62",
+                   "configurator":  "166F011F222D68CEAFD4ED2C0189B6D6D675FB34C91E94FC08B165B72EFE66E7"
                }
 }

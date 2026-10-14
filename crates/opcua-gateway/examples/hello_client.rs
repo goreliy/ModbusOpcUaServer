@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use opcua::client::{ClientBuilder, DataChangeCallback, MonitoredItem, IdentityToken};
+use opcua::client::{ClientBuilder, DataChangeCallback, IdentityToken, MonitoredItem};
 use opcua::crypto::SecurityPolicy;
 use opcua::types::{
     DataValue, MessageSecurityMode, MonitoredItemCreateRequest, NodeId, TimestampsToReturn,
@@ -86,6 +86,9 @@ fn print_value(data_value: &DataValue, item: &MonitoredItem) {
     let node_id = &item.item_to_monitor().node_id;
     match &data_value.value {
         Some(value) => println!("Data change: {node_id} = {value:?}"),
-        None => println!("Data change: {node_id} has no value (status {:?})", data_value.status),
+        None => println!(
+            "Data change: {node_id} has no value (status {:?})",
+            data_value.status
+        ),
     }
 }

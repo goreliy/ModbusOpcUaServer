@@ -36,7 +36,7 @@ pub use cache::{
     CHANGE_CAPACITY,
 };
 pub use coalesce::{coalesce, Caps, Interval};
-pub use command::WriteCommand;
+pub use command::{DiagnosticTarget, WriteCommand};
 pub use device::DeviceRuntime;
 pub use metrics::{ChannelMetrics, MetricsSnapshot};
 pub use plan::{build_all, ChannelPlan, DevicePlan, Field, Transaction};
@@ -88,7 +88,10 @@ impl Poller {
     /// called from within a tokio runtime. Borrows the config (#30): the
     /// caller keeps it for the OPC UA / MQTT / tags-core layers, which read
     /// per-register metadata from it after the poller is up.
-    pub fn spawn(cfg: &gateway_config::ResolvedConfig, sink: Arc<dyn RawValueSink>) -> PollerHandle {
+    pub fn spawn(
+        cfg: &gateway_config::ResolvedConfig,
+        sink: Arc<dyn RawValueSink>,
+    ) -> PollerHandle {
         let plans: Vec<ChannelPlan> = plan::build_all(cfg); // compile-time coalescing
         let (sd_tx, sd_rx) = watch::channel(false);
         let mut writers = HashMap::new();

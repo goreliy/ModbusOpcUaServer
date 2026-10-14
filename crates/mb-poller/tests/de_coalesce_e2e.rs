@@ -56,9 +56,11 @@ async fn coalesced_read_with_hole_splits_and_recovers() {
     let (handle, cache) = Poller::spawn_with_cache(&cfg);
 
     // The split must happen and the mapped tags recover Good.
-    wait_for("mapped tags Good after de-coalesce", Duration::from_secs(5), || {
-        good_u16(&cache, "ok_a", 11) && good_u16(&cache, "ok_b", 33)
-    })
+    wait_for(
+        "mapped tags Good after de-coalesce",
+        Duration::from_secs(5),
+        || good_u16(&cache, "ok_a", 11) && good_u16(&cache, "ok_b", 33),
+    )
     .await;
 
     // The unmapped tag stays Bad (its singleton keeps answering
@@ -68,17 +70,29 @@ async fn coalesced_read_with_hole_splits_and_recovers() {
     // The split is remembered: polling continues via the singletons, so the
     // mapped tags' seq keeps growing tick after tick.
     let seq_a0 = snap(&cache, "ok_a").seq;
-    wait_for("ok_a keeps updating via the split", Duration::from_secs(5), || {
-        snap(&cache, "ok_a").seq >= seq_a0 + 3
-    })
+    wait_for(
+        "ok_a keeps updating via the split",
+        Duration::from_secs(5),
+        || snap(&cache, "ok_a").seq >= seq_a0 + 3,
+    )
     .await;
-    assert_eq!(snap(&cache, "missing").quality, Quality::Bad, "hole stays Bad");
+    assert_eq!(
+        snap(&cache, "missing").quality,
+        Quality::Bad,
+        "hole stays Bad"
+    );
 
     // Metrics tell the same story: exceptions seen, but no reconnect churn
     // (an exception reply is proof of life, not a comm loss).
     let m = handle.metrics(ChannelId(0)).expect("metrics").snapshot();
-    assert!(m.exceptions >= 1, "the coalesced read must have hit the hole");
-    assert_eq!(m.reconnects, 0, "no reconnects: the device answered throughout");
+    assert!(
+        m.exceptions >= 1,
+        "the coalesced read must have hit the hole"
+    );
+    assert_eq!(
+        m.reconnects, 0,
+        "no reconnects: the device answered throughout"
+    );
 
     tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
         .await

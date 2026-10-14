@@ -1,0 +1,24 @@
+﻿{
+    "mcp_documentation":  "docs/MCP.md",
+    "package_version":  "0.1.0-full",
+    "server":  {
+                   "arch":  "x86_64",
+                   "debug_assertions":  false,
+                   "os":  "windows",
+                   "runtime_limit_seconds":  null,
+                   "trial":  false,
+                   "version":  "0.1.0"
+               },
+    "configurator":  {
+                         "arch":  "x86_64",
+                         "debug_assertions":  false,
+                         "os":  "windows",
+                         "runtime_limit_seconds":  null,
+                         "trial":  false,
+                         "version":  "0.1.0"
+                     },
+    "sha256":  {
+                   "server":  "7A5F9444BF706BF84D94FEF7377AB8DC860D73BDA29C5C03E92E309A4ACF9F74",
+                   "configurator":  "92AA35D66220ACBC331C36F1FFF2FC3665D1405EB17CD4BA99B1497BB5EF233C"
+               }
+}

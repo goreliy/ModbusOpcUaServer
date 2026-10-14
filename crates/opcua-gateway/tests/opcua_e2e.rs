@@ -83,7 +83,9 @@ async fn opcua_client_reads_modbus_values_through_the_whole_stack() {
                     accept_tcp_connection(stream, socket_addr, move |_| Ok(Some(service.clone())))
                 }
             };
-            let _ = server.serve(&on_connected, |err| eprintln!("mb server error: {err}")).await;
+            let _ = server
+                .serve(&on_connected, |err| eprintln!("mb server error: {err}"))
+                .await;
         })
     };
 
@@ -256,7 +258,10 @@ async fn opcua_client_reads_modbus_values_through_the_whole_stack() {
         .write(&[write_value("plc1.setpoint", Variant::Double(45.3))])
         .await
         .expect("write service");
-    assert!(statuses[0].is_good(), "write must be device-acknowledged: {statuses:?}");
+    assert!(
+        statuses[0].is_good(),
+        "write must be device-acknowledged: {statuses:?}"
+    );
     assert_eq!(
         banks.lock().unwrap()[&1][&5],
         453,
@@ -267,7 +272,11 @@ async fn opcua_client_reads_modbus_values_through_the_whole_stack() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         let dv = session
-            .read(&read_ids(&["plc1.setpoint"]), TimestampsToReturn::Source, 0.0)
+            .read(
+                &read_ids(&["plc1.setpoint"]),
+                TimestampsToReturn::Source,
+                0.0,
+            )
             .await
             .expect("read")
             .remove(0);
@@ -289,8 +298,15 @@ async fn opcua_client_reads_modbus_values_through_the_whole_stack() {
         .write(&[write_value("plc1.temp", Variant::Double(99.9))])
         .await
         .expect("write service call itself succeeds");
-    assert!(!statuses[0].is_good(), "non-writable tag must reject: {statuses:?}");
-    assert_eq!(banks.lock().unwrap()[&1][&0], before, "device register untouched");
+    assert!(
+        !statuses[0].is_good(),
+        "non-writable tag must reject: {statuses:?}"
+    );
+    assert_eq!(
+        banks.lock().unwrap()[&1][&0],
+        before,
+        "device register untouched"
+    );
 
     // ---- teardown ----
     let _ = session.disconnect().await;

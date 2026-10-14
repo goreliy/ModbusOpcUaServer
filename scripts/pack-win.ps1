@@ -3,7 +3,8 @@
 param(
     [string]$Version = "",
     [switch]$SkipBuild,
-    [switch]$Trial
+    [switch]$Trial,
+    [string]$OutputDirectory = ""
 )
 
 $ErrorActionPreference = 'Stop'
@@ -14,6 +15,12 @@ $repo = Split-Path -Parent $PSScriptRoot
 $releaseDir = Join-Path $repo 'target\release'
 $workDir = Join-Path $repo "target\package\OPC-Modbus-Server-$Version-win64"
 $outputDir = Join-Path $repo 'dist\windows'
+if ($OutputDirectory) {
+    $outputDir = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($OutputDirectory)) { $OutputDirectory } else { Join-Path $repo $OutputDirectory }))
+    $allowedOutput = [IO.Path]::GetFullPath((Join-Path $repo 'dist'))
+    if (-not $outputDir.StartsWith($allowedOutput + [IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) { throw 'OutputDirectory must be inside workspace dist' }
+    if ((Test-Path -LiteralPath $outputDir) -and ((Get-Item -LiteralPath $outputDir).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'OutputDirectory must not be a junction' }
+}
 $payloadZip = Join-Path (Split-Path -Parent $workDir) "installer-payload-$Version-win64.zip"
 $installer = Join-Path $outputDir "OPC-Modbus-Server-Setup-$Version-win64.exe"
 $serverOutput = Join-Path $outputDir 'opc-modbus-server.exe'
@@ -88,9 +95,11 @@ try {
         (Join-Path $repo 'LICENSE.md'),
         (Join-Path $repo 'installers\windows\install.cmd'),
         (Join-Path $repo 'installers\windows\install.ps1'),
+        (Join-Path $repo 'installers\windows\repair-data-permissions.ps1'),
         (Join-Path $repo 'installers\windows\uninstall.ps1') -Destination $workDir -Force
 
     $manifest = [ordered]@{
+        mcp_documentation = 'docs/MCP.md'
         package_version = $Version
         server = $serverInfo
         configurator = $configInfo
@@ -102,6 +111,8 @@ try {
     $manifestPath = Join-Path $outputDir 'build-info.json'
     $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
     Copy-Item -LiteralPath $manifestPath -Destination $workDir -Force
+    New-Item -ItemType Directory -Force -Path (Join-Path $workDir 'docs') | Out-Null
+    Copy-Item -LiteralPath (Join-Path $repo 'docs\MCP.md') -Destination (Join-Path $workDir 'docs\MCP.md') -Force
 
     # The payload ZIP is an implementation detail contained inside the installer.
     Remove-Item -LiteralPath (Join-Path $outputDir "OPC-Modbus-Server-$Version-win64.zip") -Force -ErrorAction SilentlyContinue

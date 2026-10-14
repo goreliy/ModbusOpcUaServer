@@ -17,8 +17,8 @@
 //!   index exposes the whole register as `UInt` (mask decoding in formulas);
 //!   with `bit` it behaves like `Bit`.
 
-use mb_types::{ByteOrder, DataType, WordOrder};
 use mb_poller::RawValue;
+use mb_types::{ByteOrder, DataType, WordOrder};
 
 use crate::value::TypedValue;
 
@@ -50,7 +50,10 @@ pub struct DecodeMeta {
 /// Apply the per-word byte swap, then arrange words most-significant-first.
 fn ordered_words(regs: &[u16], need: usize, meta: DecodeMeta) -> Result<Vec<u16>, DecodeError> {
     if regs.len() < need {
-        return Err(DecodeError::TooShort { got: regs.len(), need });
+        return Err(DecodeError::TooShort {
+            got: regs.len(),
+            need,
+        });
     }
     let mut words: Vec<u16> = regs[..need]
         .iter()
@@ -105,12 +108,24 @@ fn decode_registers(regs: &[u16], meta: DecodeMeta) -> Result<TypedValue, Decode
                 None => Ok(TypedValue::UInt(u64::from(w))),
             }
         }
-        DT::U16 => Ok(TypedValue::UInt(u64::from(ordered_words(regs, 1, meta)?[0]))),
-        DT::I16 => Ok(TypedValue::Int(i64::from(ordered_words(regs, 1, meta)?[0] as i16))),
-        DT::U32 => Ok(TypedValue::UInt(u64::from(combine_u32(&ordered_words(regs, 2, meta)?)))),
-        DT::I32 => Ok(TypedValue::Int(i64::from(combine_u32(&ordered_words(regs, 2, meta)?) as i32))),
-        DT::U64 => Ok(TypedValue::UInt(combine_u64(&ordered_words(regs, 4, meta)?))),
-        DT::I64 => Ok(TypedValue::Int(combine_u64(&ordered_words(regs, 4, meta)?) as i64)),
+        DT::U16 => Ok(TypedValue::UInt(u64::from(
+            ordered_words(regs, 1, meta)?[0],
+        ))),
+        DT::I16 => Ok(TypedValue::Int(i64::from(
+            ordered_words(regs, 1, meta)?[0] as i16,
+        ))),
+        DT::U32 => Ok(TypedValue::UInt(u64::from(combine_u32(&ordered_words(
+            regs, 2, meta,
+        )?)))),
+        DT::I32 => Ok(TypedValue::Int(i64::from(
+            combine_u32(&ordered_words(regs, 2, meta)?) as i32,
+        ))),
+        DT::U64 => Ok(TypedValue::UInt(combine_u64(&ordered_words(
+            regs, 4, meta,
+        )?))),
+        DT::I64 => Ok(TypedValue::Int(
+            combine_u64(&ordered_words(regs, 4, meta)?) as i64
+        )),
         DT::F32 => Ok(TypedValue::Float(f64::from(f32::from_bits(combine_u32(
             &ordered_words(regs, 2, meta)?,
         ))))),
@@ -192,11 +207,21 @@ pub fn encode(value: &TypedValue, meta: DecodeMeta) -> Result<Vec<u16>, DecodeEr
         }
         DT::U64 => {
             let v = to_u64(value)?;
-            vec![(v >> 48) as u16, (v >> 32) as u16, (v >> 16) as u16, v as u16]
+            vec![
+                (v >> 48) as u16,
+                (v >> 32) as u16,
+                (v >> 16) as u16,
+                v as u16,
+            ]
         }
         DT::I64 => {
             let v = to_i64(value)? as u64;
-            vec![(v >> 48) as u16, (v >> 32) as u16, (v >> 16) as u16, v as u16]
+            vec![
+                (v >> 48) as u16,
+                (v >> 32) as u16,
+                (v >> 16) as u16,
+                v as u16,
+            ]
         }
         DT::F32 => {
             let f = value.as_f64().ok_or_else(|| unsupported("non-numeric"))?;
@@ -206,7 +231,12 @@ pub fn encode(value: &TypedValue, meta: DecodeMeta) -> Result<Vec<u16>, DecodeEr
         DT::F64 => {
             let f = value.as_f64().ok_or_else(|| unsupported("non-numeric"))?;
             let v = f.to_bits();
-            vec![(v >> 48) as u16, (v >> 32) as u16, (v >> 16) as u16, v as u16]
+            vec![
+                (v >> 48) as u16,
+                (v >> 32) as u16,
+                (v >> 16) as u16,
+                v as u16,
+            ]
         }
         DT::Bit | DT::Bitfield | DT::Bcd | DT::Ascii => {
             return Err(unsupported("write of this data_type"));
@@ -246,7 +276,10 @@ mod tests {
 
     #[test]
     fn scalar_types_decode_big_endian() {
-        assert_eq!(decode(&regs(&[1500]), meta(DataType::U16)), Ok(TypedValue::UInt(1500)));
+        assert_eq!(
+            decode(&regs(&[1500]), meta(DataType::U16)),
+            Ok(TypedValue::UInt(1500))
+        );
         assert_eq!(
             decode(&regs(&[0xFFFF]), meta(DataType::I16)),
             Ok(TypedValue::Int(-1))
@@ -279,7 +312,10 @@ mod tests {
             (bits >> 16) as u16,
             bits as u16,
         ];
-        assert_eq!(decode(&regs(&words), meta(DataType::F64)), Ok(TypedValue::Float(12.34)));
+        assert_eq!(
+            decode(&regs(&words), meta(DataType::F64)),
+            Ok(TypedValue::Float(12.34))
+        );
     }
 
     #[test]
@@ -312,15 +348,27 @@ mod tests {
         };
         // Logical value 0x12345678: MSW=0x1234 LSW=0x5678; device sends
         // low-word-first with bytes swapped in each: [0x7856, 0x3412].
-        assert_eq!(decode(&regs(&[0x7856, 0x3412]), m), Ok(TypedValue::UInt(0x1234_5678)));
+        assert_eq!(
+            decode(&regs(&[0x7856, 0x3412]), m),
+            Ok(TypedValue::UInt(0x1234_5678))
+        );
     }
 
     #[test]
     fn bit_and_bitfield_selection() {
-        let m = DecodeMeta { bit: Some(0), ..meta(DataType::Bit) };
+        let m = DecodeMeta {
+            bit: Some(0),
+            ..meta(DataType::Bit)
+        };
         assert_eq!(decode(&regs(&[0b0000_0001]), m), Ok(TypedValue::Bool(true)));
-        let m = DecodeMeta { bit: Some(1), ..meta(DataType::Bit) };
-        assert_eq!(decode(&regs(&[0b0000_0001]), m), Ok(TypedValue::Bool(false)));
+        let m = DecodeMeta {
+            bit: Some(1),
+            ..meta(DataType::Bit)
+        };
+        assert_eq!(
+            decode(&regs(&[0b0000_0001]), m),
+            Ok(TypedValue::Bool(false))
+        );
 
         // Bitfield without index = whole register as UInt.
         assert_eq!(
@@ -328,12 +376,18 @@ mod tests {
             Ok(TypedValue::UInt(0b1010))
         );
         // Bitfield with index = that bit.
-        let m = DecodeMeta { bit: Some(3), ..meta(DataType::Bitfield) };
+        let m = DecodeMeta {
+            bit: Some(3),
+            ..meta(DataType::Bitfield)
+        };
         assert_eq!(decode(&regs(&[0b1010]), m), Ok(TypedValue::Bool(true)));
 
         // Coil payloads: first bit wins regardless of data_type.
         assert_eq!(
-            decode(&RawValue::Bits(Arc::from([true].as_slice())), meta(DataType::Bit)),
+            decode(
+                &RawValue::Bits(Arc::from([true].as_slice())),
+                meta(DataType::Bit)
+            ),
             Ok(TypedValue::Bool(true))
         );
     }
@@ -341,7 +395,10 @@ mod tests {
     #[test]
     fn bcd_and_ascii_decode() {
         // BCD 1234 in one register.
-        assert_eq!(decode(&regs(&[0x1234]), meta(DataType::Bcd)), Ok(TypedValue::UInt(1234)));
+        assert_eq!(
+            decode(&regs(&[0x1234]), meta(DataType::Bcd)),
+            Ok(TypedValue::UInt(1234))
+        );
         // Two registers: 12345678.
         assert_eq!(
             decode(&regs(&[0x1234, 0x5678]), meta(DataType::Bcd)),
@@ -366,7 +423,10 @@ mod tests {
             decode(&regs(&[0x0001]), meta(DataType::U32)),
             Err(DecodeError::TooShort { got: 1, need: 2 })
         );
-        assert_eq!(decode(&RawValue::Absent, meta(DataType::U16)), Err(DecodeError::Absent));
+        assert_eq!(
+            decode(&RawValue::Absent, meta(DataType::U16)),
+            Err(DecodeError::Absent)
+        );
     }
 
     #[test]
@@ -374,13 +434,26 @@ mod tests {
         for (dt, val, regs_in) in [
             (DataType::U16, TypedValue::UInt(1500), vec![1500u16]),
             (DataType::I16, TypedValue::Int(-1), vec![0xFFFF]),
-            (DataType::U32, TypedValue::UInt(100_000), vec![0x0001, 0x86A0]),
+            (
+                DataType::U32,
+                TypedValue::UInt(100_000),
+                vec![0x0001, 0x86A0],
+            ),
             (DataType::I32, TypedValue::Int(-2), vec![0xFFFF, 0xFFFE]),
-            (DataType::F32, TypedValue::Float(f64::from(12.34_f32)), vec![0x4145, 0x70A4]),
+            (
+                DataType::F32,
+                TypedValue::Float(f64::from(12.34_f32)),
+                vec![0x4145, 0x70A4],
+            ),
         ] {
             for word_order in [WordOrder::BigEndian, WordOrder::LittleEndian] {
                 for byte_order in [ByteOrder::BigEndian, ByteOrder::LittleEndian] {
-                    let m = DecodeMeta { data_type: dt, word_order, byte_order, bit: None };
+                    let m = DecodeMeta {
+                        data_type: dt,
+                        word_order,
+                        byte_order,
+                        bit: None,
+                    };
                     // encode(decode(x)) == x for the canonical big-endian regs
                     // transformed into this ordering.
                     let mut expected = regs_in.clone();

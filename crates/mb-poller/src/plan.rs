@@ -145,7 +145,12 @@ fn build_device(dev: &ResolvedDevice, group_ids: &[PollGroupId]) -> DevicePlan {
             let mut txns: Vec<Transaction> = Vec::new();
             // Bucket per area: one Modbus PDU carries one function, so FC03
             // and FC04 (etc.) never merge.
-            for area in [Area::Coils, Area::DiscreteInputs, Area::Holding, Area::Input] {
+            for area in [
+                Area::Coils,
+                Area::DiscreteInputs,
+                Area::Holding,
+                Area::Input,
+            ] {
                 let ivals: Vec<Interval> = dev
                     .registers
                     .iter()
@@ -153,7 +158,13 @@ fn build_device(dev: &ResolvedDevice, group_ids: &[PollGroupId]) -> DevicePlan {
                     .map(|r| to_interval(r, area))
                     .collect();
                 if !ivals.is_empty() {
-                    txns.extend(coalesce(area, ivals, Caps { max_gap: dev.max_gap }));
+                    txns.extend(coalesce(
+                        area,
+                        ivals,
+                        Caps {
+                            max_gap: dev.max_gap,
+                        },
+                    ));
                 }
             }
             // Custom entries never coalesce: one transaction each.
@@ -274,7 +285,11 @@ mod tests {
         assert_eq!(d.unit, 5);
         assert_eq!(d.all_tags, vec![TagId(0), TagId(1), TagId(2)]);
         let txns = &d.by_group[0].1;
-        assert_eq!(txns.len(), 1, "f32@100 + u16@102 + gap2 + u16@105 -> one txn");
+        assert_eq!(
+            txns.len(),
+            1,
+            "f32@100 + u16@102 + gap2 + u16@105 -> one txn"
+        );
         let t = &txns[0];
         assert_eq!(addr_qty(&t.req), (100, 6));
         assert_eq!(t.base, 100);
@@ -312,7 +327,11 @@ mod tests {
         let p = &build_all(&cfg)[0];
         assert_eq!(p.devices[0].request_timeout, Duration::from_millis(2000));
         assert_eq!(p.devices[0].retry.max_retries, 0);
-        assert_eq!(p.devices[1].request_timeout, Duration::from_millis(500), "inherits channel");
+        assert_eq!(
+            p.devices[1].request_timeout,
+            Duration::from_millis(500),
+            "inherits channel"
+        );
         assert_eq!(p.devices[1].retry.max_retries, 2, "inherits channel");
     }
 
@@ -335,8 +354,14 @@ mod tests {
         }"#);
         let txns = &build_all(&cfg)[0].devices[0].by_group[0].1;
         assert_eq!(txns.len(), 2, "adjacent but different areas must not merge");
-        assert!(matches!(txns[0].req, ModbusRequest::ReadHoldingRegisters { addr: 0, qty: 1 }));
-        assert!(matches!(txns[1].req, ModbusRequest::ReadInputRegisters { addr: 1, qty: 1 }));
+        assert!(matches!(
+            txns[0].req,
+            ModbusRequest::ReadHoldingRegisters { addr: 0, qty: 1 }
+        ));
+        assert!(matches!(
+            txns[1].req,
+            ModbusRequest::ReadInputRegisters { addr: 1, qty: 1 }
+        ));
         assert!(!txns[0].coalesced && !txns[1].coalesced);
     }
 
@@ -362,7 +387,10 @@ mod tests {
         let txns = &build_all(&cfg)[0].devices[0].by_group[0].1;
         // One merged holding read + two Custom singletons, despite max_gap 50.
         assert_eq!(txns.len(), 3);
-        assert!(matches!(txns[0].req, ModbusRequest::ReadHoldingRegisters { addr: 0, qty: 2 }));
+        assert!(matches!(
+            txns[0].req,
+            ModbusRequest::ReadHoldingRegisters { addr: 0, qty: 2 }
+        ));
         // B4: x1 carries its parsed custom_request payload; x2 has none.
         for (t, (code, payload)) in txns[1..]
             .iter()
@@ -371,7 +399,11 @@ mod tests {
             assert!(!t.coalesced);
             assert_eq!(t.fields.len(), 1);
             match &t.req {
-                ModbusRequest::Custom { code: c, data, expect_len } => {
+                ModbusRequest::Custom {
+                    code: c,
+                    data,
+                    expect_len,
+                } => {
                     assert_eq!(*c, code);
                     assert_eq!(*data, payload, "plan must carry the custom_request bytes");
                     assert_eq!(*expect_len, Some(8));
@@ -437,8 +469,14 @@ mod tests {
         assert_eq!(dev_a.by_group[1].1.len(), 1);
         // devB: coil read (width 1) in fast, holding in slow.
         let dev_b = &p.devices[1];
-        assert!(matches!(dev_b.by_group[0].1[0].req, ModbusRequest::ReadCoils { addr: 3, qty: 1 }));
-        assert!(matches!(dev_b.by_group[1].1[0].req, ModbusRequest::ReadHoldingRegisters { addr: 10, qty: 1 }));
+        assert!(matches!(
+            dev_b.by_group[0].1[0].req,
+            ModbusRequest::ReadCoils { addr: 3, qty: 1 }
+        ));
+        assert!(matches!(
+            dev_b.by_group[1].1[0].req,
+            ModbusRequest::ReadHoldingRegisters { addr: 10, qty: 1 }
+        ));
     }
 
     #[test]
@@ -462,7 +500,15 @@ mod tests {
             } ]
         }"#);
         let plans = build_all(&cfg);
-        assert_eq!(plans[0].devices[0].by_group[0].1.len(), 1, "channel max_gap=5 bridges");
-        assert_eq!(plans[0].devices[1].by_group[0].1.len(), 2, "device max_gap=0 forbids holes");
+        assert_eq!(
+            plans[0].devices[0].by_group[0].1.len(),
+            1,
+            "channel max_gap=5 bridges"
+        );
+        assert_eq!(
+            plans[0].devices[1].by_group[0].1.len(),
+            2,
+            "device max_gap=0 forbids holes"
+        );
     }
 }

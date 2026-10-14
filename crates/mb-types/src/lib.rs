@@ -21,17 +21,35 @@ mod tests {
     fn function_code_serde_round_trip() {
         let cases: &[(FunctionCode, &str)] = &[
             (FunctionCode::ReadCoils, r#""read_coils""#),
-            (FunctionCode::ReadDiscreteInputs, r#""read_discrete_inputs""#),
-            (FunctionCode::ReadHoldingRegisters, r#""read_holding_registers""#),
-            (FunctionCode::ReadInputRegisters, r#""read_input_registers""#),
+            (
+                FunctionCode::ReadDiscreteInputs,
+                r#""read_discrete_inputs""#,
+            ),
+            (
+                FunctionCode::ReadHoldingRegisters,
+                r#""read_holding_registers""#,
+            ),
+            (
+                FunctionCode::ReadInputRegisters,
+                r#""read_input_registers""#,
+            ),
             (FunctionCode::WriteSingleCoil, r#""write_single_coil""#),
-            (FunctionCode::WriteSingleRegister, r#""write_single_register""#),
-            (FunctionCode::WriteMultipleCoils, r#""write_multiple_coils""#),
+            (
+                FunctionCode::WriteSingleRegister,
+                r#""write_single_register""#,
+            ),
+            (
+                FunctionCode::WriteMultipleCoils,
+                r#""write_multiple_coils""#,
+            ),
             (
                 FunctionCode::WriteMultipleRegisters,
                 r#""write_multiple_registers""#,
             ),
-            (FunctionCode::Custom { code: 0x41 }, r#"{"custom":{"code":65}}"#),
+            (
+                FunctionCode::Custom { code: 0x41 },
+                r#"{"custom":{"code":65}}"#,
+            ),
         ];
         for (fc, json) in cases {
             assert_eq!(&to_string(fc).unwrap(), json, "serialize {fc:?}");

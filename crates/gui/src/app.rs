@@ -15,7 +15,10 @@ use crate::testpoll::TestPoll;
 /// Кириллица гарантированно: подмешиваем системный шрифт первым в стек.
 pub fn install_fonts(ctx: &egui::Context) {
     let candidates: &[&str] = if cfg!(windows) {
-        &[r"C:\Windows\Fonts\segoeui.ttf", r"C:\Windows\Fonts\arial.ttf"]
+        &[
+            r"C:\Windows\Fonts\segoeui.ttf",
+            r"C:\Windows\Fonts\arial.ttf",
+        ]
     } else {
         &[
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -76,6 +79,62 @@ pub struct ConfigApp {
     disk_snapshot: Option<Vec<u8>>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn editor_loads_working_file_and_follows_mcp_edits_without_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let config = serde_json::json!({
+            "schema_version":"1", "gateway":{"data_dir":dir.path().join("data")},
+            "mcp":{"port":0}, "opcua":{"enabled":false},
+            "poll_groups":[{"id":"p","period_ms":100}],
+            "channels":[{"id":"test","enabled":false,
+                "transport":{"type":"tcp","host":"127.0.0.1","port":502},
+                "devices":[{"id":"device","unit_id":1,"registers":[
+                    {"tag":"loaded-tag","poll_group":"p","address":0,
+                     "function":"read_holding_registers","data_type":"u16"}
+                ]}]}]
+        });
+        std::fs::write(&path, config.to_string()).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let owner = rt.block_on(svc_host::mcp::Controller::new(&path)).unwrap();
+        rt.block_on(owner.start_server()).unwrap();
+        let mut app = ConfigApp::empty(Default::default());
+        app.load_path(path.clone());
+        assert_eq!(
+            app.cfg.channels[0].devices[0].registers[0].tag,
+            "loaded-tag"
+        );
+        assert_eq!(app.path, Some(std::fs::canonicalize(&path).unwrap()));
+        let revision = svc_host::mcp::fingerprint(&std::fs::read(&path).unwrap());
+        rt.block_on(owner.call(
+            "patch_config",
+            serde_json::json!({
+                "expected_revision":revision,
+                "patch":{"poll_groups":[{"id":"p","period_ms":250}]}
+            }),
+        ))
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.cfg.poll_groups[0].period_ms != 250 || !app.server.is_running() {
+            app.server.pump();
+            app.sync_external();
+            assert!(Instant::now() < deadline, "{:?}", app.server.last_error);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            app.cfg.channels[0].devices[0].registers[0].tag,
+            "loaded-tag"
+        );
+        app.server.shutdown_blocking();
+        assert!(owner.view().running);
+        rt.block_on(owner.shutdown());
+    }
+}
+
 #[derive(Default)]
 struct HashDialog {
     user_idx: usize,
@@ -85,6 +144,32 @@ struct HashDialog {
 
 impl ConfigApp {
     pub fn new(logs: LogBuffer) -> Self {
+        let mut app = Self::empty(logs);
+        let args: Vec<_> = std::env::args().collect();
+        let path = args
+            .windows(2)
+            .find(|p| p[0] == "--config" || p[0] == "-c")
+            .map(|p| PathBuf::from(&p[1]))
+            .unwrap_or_else(svc_host::mcp::default_config_path);
+        if !path.exists() {
+            let created = (|| {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(
+                    &path,
+                    serde_json::to_vec_pretty(&ConfigFile::V1(app.cfg.clone())).unwrap(),
+                )
+            })();
+            if let Err(e) = created {
+                app.status = format!("Не удалось создать {}: {e}", path.display());
+                return app;
+            }
+        }
+        app.load_path(path);
+        app
+    }
+    fn empty(logs: LogBuffer) -> Self {
         Self {
             path: None,
             cfg: template_config(),
@@ -104,6 +189,32 @@ impl ConfigApp {
             disk_snapshot: None,
         }
     }
+    fn load_path(&mut self, path: PathBuf) {
+        match std::fs::read(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| {
+                let text = std::str::from_utf8(&bytes)
+                    .map_err(|e| e.to_string())?
+                    .trim_start_matches('\u{feff}');
+                let file = serde_json::from_str::<ConfigFile>(text).map_err(|e| e.to_string())?;
+                Ok((file, bytes))
+            }) {
+            Ok((ConfigFile::V1(cfg), bytes)) => {
+                self.server.shutdown_blocking();
+                let path = std::fs::canonicalize(path)
+                    .unwrap_or_else(|_| svc_host::mcp::default_config_path());
+                self.cfg = cfg;
+                self.path = Some(path.clone());
+                self.disk_snapshot = Some(bytes);
+                self.dirty = false;
+                self.section = Section::Server;
+                self.selected_register = None;
+                self.status = format!("Рабочая конфигурация: {}", path.display());
+                self.server.attach(path);
+            }
+            Err(e) => self.status = format!("Ошибка открытия {}: {e}", path.display()),
+        }
+    }
 }
 
 /// Поле адреса регистра с выбором системы счисления (dec/hex).
@@ -119,14 +230,23 @@ fn address_edit(ui: &mut egui::Ui, addr: &mut u16, hex: bool) {
 fn template_config() -> ConfigV1 {
     ConfigV1 {
         gateway: GatewaySettings::default(),
+        mcp: McpConfig::default(),
         opcua: OpcUaConfig::default(),
         logging: LoggingConfig {
             dir: Some("./logs".into()),
             ..LoggingConfig::default()
         },
         poll_groups: vec![
-            PollGroupConfig { id: "fast".into(), period_ms: 500, priority: 0 },
-            PollGroupConfig { id: "slow".into(), period_ms: 5000, priority: 0 },
+            PollGroupConfig {
+                id: "fast".into(),
+                period_ms: 500,
+                priority: 0,
+            },
+            PollGroupConfig {
+                id: "slow".into(),
+                period_ms: 5000,
+                priority: 0,
+            },
         ],
         channels: vec![],
     }
@@ -134,6 +254,13 @@ fn template_config() -> ConfigV1 {
 
 impl eframe::App for ConfigApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if let Some(path) = &self.path {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
+                "OPC Modbus — {} · {}",
+                self.cfg.gateway.instance_name,
+                svc_host::mcp::config_id(path)
+            )));
+        }
         if !self.ports_loaded {
             self.ports = mb_proto::available_serial_ports();
             self.ports_loaded = true;
@@ -144,21 +271,20 @@ impl eframe::App for ConfigApp {
                 ctx.request_repaint_after(Duration::from_millis(100));
             }
         }
-        if self.server.pump() || self.server.is_running() || self.server.is_busy() {
+        if self.server.pump()
+            || self.server.is_running()
+            || self.server.is_busy()
+            || self.server.has_mcp()
+            || self.path.is_some()
+        {
             // Пока сервер жив — обновляем метрики/значения раз в секунду.
-            ctx.request_repaint_after(if self.server.is_busy() { Duration::from_millis(250) } else { Duration::from_secs(1) });
-        }
-        if let Some((bytes, cfg)) = self.server.take_external_config() {
-            if self.dirty {
-                self.status = "Файл изменён извне; несохранённые правки оставлены в редакторе. Сохраните их в другой файл или откройте актуальную конфигурацию после останова.".into();
+            ctx.request_repaint_after(if self.server.is_busy() {
+                Duration::from_millis(250)
             } else {
-                self.cfg = cfg;
-                self.disk_snapshot = Some(bytes);
-                self.section = Section::Server;
-                self.selected_register = None;
-                self.status = "Редактор обновлён из изменённого файла конфигурации".into();
-            }
+                Duration::from_secs(1)
+            });
         }
+        self.sync_external();
 
         // Наполняем историю значений для открытых графиков (только по тем
         // тегам, чьё окно открыто — это ограничивает объём даже на больших
@@ -182,33 +308,35 @@ impl eframe::App for ConfigApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // Закрытие окна при работающем сервере — корректный останов.
+        // Close this owner, or detach from a separately running server/service.
         self.server.shutdown_blocking();
     }
 }
 
 impl ConfigApp {
+    fn sync_external(&mut self) {
+        if let Some((bytes, cfg)) = self.server.take_external_config() {
+            if self.dirty {
+                self.status = "Файл изменён извне; несохранённые правки оставлены в редакторе. Сохраните их в другой файл или откройте актуальную конфигурацию.".into();
+            } else {
+                self.cfg = cfg;
+                self.disk_snapshot = Some(bytes);
+                self.section = Section::Server;
+                self.selected_register = None;
+                self.status = "Редактор обновлён из изменённого файла конфигурации".into();
+            }
+        }
+    }
     // ---------- файл ----------
 
     fn open(&mut self) {
-        let Some(path) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() else {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("JSON", &["json"])
+            .pick_file()
+        else {
             return;
         };
-        match std::fs::read_to_string(&path)
-            .map_err(|e| e.to_string())
-            .and_then(|text| serde_json::from_str::<ConfigFile>(&text).map(|cfg| (cfg, text.into_bytes())).map_err(|e| e.to_string()))
-        {
-            Ok((ConfigFile::V1(cfg), bytes)) => {
-                self.cfg = cfg;
-                self.status = format!("Открыт {}", path.display());
-                self.path = Some(path);
-                self.dirty = false;
-                self.section = Section::Server;
-                self.selected_register = None;
-                self.disk_snapshot = Some(bytes);
-            }
-            Err(e) => self.status = format!("Ошибка открытия: {e}"),
-        }
+        self.load_path(path);
     }
 
     fn save(&mut self, save_as: bool) {
@@ -233,9 +361,25 @@ impl ConfigApp {
                 }
             }
         }
-        let problems: Vec<_> = gateway_config::validate::validate(&self.cfg).into_iter().filter(|e| !e.is_warning()).map(|e| e.to_string()).chain(
-            tags_core::check_config_formulas(self.cfg.channels.iter().flat_map(|c| &c.devices).flat_map(|d| &d.registers).map(|r| (r.tag.as_str(), r.formula.as_deref(), r.write_formula.as_deref())))
-        ).collect();
+        let problems: Vec<_> = gateway_config::validate::validate(&self.cfg)
+            .into_iter()
+            .filter(|e| !e.is_warning())
+            .map(|e| e.to_string())
+            .chain(tags_core::check_config_formulas(
+                self.cfg
+                    .channels
+                    .iter()
+                    .flat_map(|c| &c.devices)
+                    .flat_map(|d| &d.registers)
+                    .map(|r| {
+                        (
+                            r.tag.as_str(),
+                            r.formula.as_deref(),
+                            r.write_formula.as_deref(),
+                        )
+                    }),
+            ))
+            .collect();
         if !problems.is_empty() {
             self.status = format!("Конфигурация не сохранена: {}", problems.join("; "));
             return;
@@ -246,11 +390,15 @@ impl ConfigApp {
         {
             Ok(()) => {
                 self.status = format!("Сохранено в {}", path.display());
-                self.path = Some(path);
+                let path = std::fs::canonicalize(&path).unwrap_or(path);
+                let changed_path = self.path.as_ref() != Some(&path);
+                self.path = Some(path.clone());
                 self.dirty = false;
                 self.disk_snapshot = std::fs::read(self.path.as_ref().unwrap()).ok();
                 self.server.watch_file(self.path.clone());
-                if self.server.is_running() {
+                if changed_path && self.server.has_mcp() {
+                    self.server.attach(path);
+                } else if self.server.is_running() {
                     match gateway_config::load(self.path.as_ref().unwrap()) {
                         Ok(cfg) => self.server.reload(cfg),
                         Err(e) => self.server.last_error = Some(e.to_string()),
@@ -269,8 +417,9 @@ impl ConfigApp {
                 let running = self.server.is_running() || self.server.is_busy();
                 ui.add_enabled_ui(!running, |ui| {
                     if ui.button("Новый").clicked() {
+                        self.server.shutdown_blocking();
                         let logs = self.logs.clone();
-                        *self = ConfigApp::new(logs);
+                        *self = ConfigApp::empty(logs);
                     }
                     if ui.button("Открыть…").clicked() {
                         self.open();
@@ -320,35 +469,76 @@ impl ConfigApp {
             });
         }
 
-        egui::SidePanel::left("nav").min_width(230.0).show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.heading("Разделы");
-                let srv = if self.server.is_running() { "● Сервер" } else { "○ Сервер" };
-                item(ui, current, &mut clicked, srv.into(), Section::Server, 0.0);
-                item(ui, current, &mut clicked, "Сервер OPC UA".into(), Section::OpcUa, 0.0);
-                item(ui, current, &mut clicked, "Общие и логи".into(), Section::General, 0.0);
-                item(ui, current, &mut clicked, "Группы опроса".into(), Section::PollGroups, 0.0);
+        egui::SidePanel::left("nav")
+            .min_width(230.0)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.heading("Разделы");
+                    let srv = if self.server.is_running() {
+                        "● Сервер"
+                    } else {
+                        "○ Сервер"
+                    };
+                    item(ui, current, &mut clicked, srv.into(), Section::Server, 0.0);
+                    item(
+                        ui,
+                        current,
+                        &mut clicked,
+                        "Сервер OPC UA".into(),
+                        Section::OpcUa,
+                        0.0,
+                    );
+                    item(
+                        ui,
+                        current,
+                        &mut clicked,
+                        "Общие и логи".into(),
+                        Section::General,
+                        0.0,
+                    );
+                    item(
+                        ui,
+                        current,
+                        &mut clicked,
+                        "Группы опроса".into(),
+                        Section::PollGroups,
+                        0.0,
+                    );
 
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.heading("Каналы");
-                    if ui.button("+").on_hover_text("Добавить канал").clicked() {
-                        let n = self.cfg.channels.len() + 1;
-                        self.cfg.channels.push(new_channel(&format!("channel-{n}")));
-                        clicked = Some(Section::Channel(self.cfg.channels.len() - 1));
-                        self.dirty = true;
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.heading("Каналы");
+                        if ui.button("+").on_hover_text("Добавить канал").clicked() {
+                            let n = self.cfg.channels.len() + 1;
+                            self.cfg.channels.push(new_channel(&format!("channel-{n}")));
+                            clicked = Some(Section::Channel(self.cfg.channels.len() - 1));
+                            self.dirty = true;
+                        }
+                    });
+                    for (ci, ch) in self.cfg.channels.iter().enumerate() {
+                        let ch_label = format!("{} {}", if ch.enabled { "▶" } else { "⏸" }, ch.id);
+                        item(
+                            ui,
+                            current,
+                            &mut clicked,
+                            ch_label,
+                            Section::Channel(ci),
+                            8.0,
+                        );
+                        for (di, dev) in ch.devices.iter().enumerate() {
+                            let label = format!("{} (unit {})", dev.id, dev.unit_id);
+                            item(
+                                ui,
+                                current,
+                                &mut clicked,
+                                label,
+                                Section::Device(ci, di),
+                                28.0,
+                            );
+                        }
                     }
                 });
-                for (ci, ch) in self.cfg.channels.iter().enumerate() {
-                    let ch_label = format!("{} {}", if ch.enabled { "▶" } else { "⏸" }, ch.id);
-                    item(ui, current, &mut clicked, ch_label, Section::Channel(ci), 8.0);
-                    for (di, dev) in ch.devices.iter().enumerate() {
-                        let label = format!("{} (unit {})", dev.id, dev.unit_id);
-                        item(ui, current, &mut clicked, label, Section::Device(ci, di), 28.0);
-                    }
-                }
             });
-        });
 
         if let Some(target) = clicked {
             self.section = target;
@@ -369,7 +559,13 @@ impl ConfigApp {
             .iter()
             .flat_map(|c| &c.devices)
             .flat_map(|d| &d.registers)
-            .map(|r| (r.tag.as_str(), r.formula.as_deref(), r.write_formula.as_deref()));
+            .map(|r| {
+                (
+                    r.tag.as_str(),
+                    r.formula.as_deref(),
+                    r.write_formula.as_deref(),
+                )
+            });
         for msg in tags_core::check_config_formulas(regs) {
             problems.push((false, format!("формула: {msg}")));
         }
@@ -424,6 +620,39 @@ impl ConfigApp {
 
     fn ui_server(&mut self, ui: &mut egui::Ui) {
         ui.heading("Сервер");
+        if let Some(path) = &self.path {
+            if let Ok(info) = svc_host::mcp::connection_info(path) {
+                ui.label(format!(
+                    "Конфиг: {}",
+                    info["config_path"].as_str().unwrap_or("")
+                ));
+                ui.label(format!(
+                    "Экземпляр: {} · {}",
+                    info["instance_name"].as_str().unwrap_or(""),
+                    info["config_id"].as_str().unwrap_or("")
+                ));
+                ui.label(format!(
+                    "Программа: {}",
+                    info["executable_directory"].as_str().unwrap_or("")
+                ));
+                ui.label(format!(
+                    "Данные: {}",
+                    info["data_directory"].as_str().unwrap_or("")
+                ));
+                ui.horizontal(|ui| {
+                    for (label, key) in [
+                        ("Копировать настройки Codex", "codex_toml"),
+                        ("Копировать настройки Claude", "claude_json"),
+                        ("Копировать команду MCP", "stdio_command"),
+                    ] {
+                        if ui.button(label).clicked() {
+                            ui.ctx()
+                                .copy_text(info[key].as_str().unwrap_or("").to_owned());
+                        }
+                    }
+                });
+            }
+        }
         // Кнопки мутируют self.server; собираем намерение и применяем после
         // разбора состояния (иначе конфликт заимствования с &self.server.state).
         let mut do_start = false;
@@ -439,8 +668,7 @@ impl ConfigApp {
                 if hint_unsaved {
                     ui.colored_label(
                         Color32::from_rgb(200, 140, 0),
-                        "Конфиг не сохранён — относительные пути (./data, ./logs, pki) \
-                         будут считаться от текущего каталога.",
+                        if self.path.is_none() { "Сохраните конфигурацию, чтобы подключить MCP-клиент к этому экземпляру." } else { "Есть несохранённые изменения. Рабочий сервер использует сохранённую конфигурацию." },
                     );
                 }
                 if ui.button("▶ Запустить сервер").clicked() {
@@ -450,7 +678,7 @@ impl ConfigApp {
             ServerState::Starting => {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label("Запуск...");
+                    ui.label("Подключение к выбранному экземпляру...");
                 });
             }
             ServerState::Stopping => {
@@ -460,19 +688,74 @@ impl ConfigApp {
                 });
             }
             ServerState::Reloading { .. } => {
-                ui.horizontal(|ui| { ui.spinner(); ui.label("Применение конфигурации без перезапуска..."); });
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Применение конфигурации без перезапуска...");
+                });
             }
             ServerState::Running { stack, since } => {
                 ui.label(format!("Версия конфигурации: {}", stack.revision()));
-                if let Some(error) = &self.server.last_error { ui.colored_label(Color32::RED, error); }
+                let (saved, applied) = stack.config_revisions();
+                ui.label(format!(
+                    "Сохранена: {}  |  Применена: {}",
+                    saved
+                        .as_deref()
+                        .map(|s| &s[..s.len().min(12)])
+                        .unwrap_or("—"),
+                    applied
+                        .as_deref()
+                        .map(|s| &s[..s.len().min(12)])
+                        .unwrap_or("—")
+                ));
+                if saved != applied {
+                    ui.colored_label(
+                        Color32::from_rgb(200, 140, 0),
+                        "Сохранённая конфигурация ещё не применена к опросу.",
+                    );
+                }
+                if let Some(error) = &self.server.last_error {
+                    ui.colored_label(Color32::RED, error);
+                }
                 let uptime = since.elapsed().as_secs();
                 ui.horizontal(|ui| {
-                    ui.colored_label(Color32::from_rgb(0, 160, 0), "● Работает");
+                    ui.colored_label(
+                        Color32::from_rgb(0, 160, 0),
+                        if stack.is_running() {
+                            "● Опрос запущен"
+                        } else {
+                            "Остановлен; MCP доступен"
+                        },
+                    );
                     ui.label(format!("время работы: {}с", uptime));
-                    if ui.button("⏹ Остановить").clicked() {
+                    if stack.is_running() && ui.button("⏹ Остановить").clicked() {
                         do_stop = true;
                     }
+                    if !stack.is_running() && ui.button("▶ Запустить сервер").clicked()
+                    {
+                        do_start = true;
+                    }
                 });
+                if let Some(url) = stack.mcp_url() {
+                    ui.label(format!("MCP: {url}"));
+                    let clients = stack.mcp_clients();
+                    if clients.is_empty() {
+                        ui.label("MCP-клиенты: нет подключённых");
+                    } else {
+                        ui.colored_label(
+                            Color32::from_rgb(0, 160, 0),
+                            format!("● MCP-клиентов подключено: {}", clients.len()),
+                        );
+                        for client in clients {
+                            ui.label(format!(
+                                "{} {} · {} · {}",
+                                client.name,
+                                client.version,
+                                client.transport,
+                                &client.id[..client.id.len().min(8)]
+                            ));
+                        }
+                    }
+                }
                 if let Some(url) = stack.endpoint_url() {
                     ui.horizontal(|ui| {
                         ui.label("Эндпоинт:");
@@ -494,22 +777,31 @@ impl ConfigApp {
                 // Клиенты OPC UA.
                 if let Some(op) = stack.opcua() {
                     ui.separator();
-                    ui.label(RichText::new(format!("Клиентов подключено: {}", op.session_count())).strong());
+                    ui.label(
+                        RichText::new(format!("Клиентов подключено: {}", op.session_count()))
+                            .strong(),
+                    );
                     let events = op.recent_authentications();
                     if !events.is_empty() {
                         ui.label("Недавние подключения:");
-                        egui::Grid::new("sessions").num_columns(3).striped(true).show(ui, |ui| {
-                            ui.label(RichText::new("Пользователь").strong());
-                            ui.label(RichText::new("Эндпоинт").strong());
-                            ui.label(RichText::new("Политика").strong());
-                            ui.end_row();
-                            for e in events.iter().rev().take(20) {
-                                ui.label(&e.user);
-                                ui.label(&e.endpoint_path);
-                                ui.label(format!("{} / {}", e.security_policy, e.security_mode));
+                        egui::Grid::new("sessions")
+                            .num_columns(3)
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.label(RichText::new("Пользователь").strong());
+                                ui.label(RichText::new("Эндпоинт").strong());
+                                ui.label(RichText::new("Политика").strong());
                                 ui.end_row();
-                            }
-                        });
+                                for e in events.iter().rev().take(20) {
+                                    ui.label(&e.user);
+                                    ui.label(&e.endpoint_path);
+                                    ui.label(format!(
+                                        "{} / {}",
+                                        e.security_policy, e.security_mode
+                                    ));
+                                    ui.end_row();
+                                }
+                            });
                     }
                 }
                 // Метрики каналов.
@@ -517,22 +809,37 @@ impl ConfigApp {
                 if !metrics.is_empty() {
                     ui.separator();
                     ui.label(RichText::new("Каналы Modbus").strong());
-                    egui::Grid::new("chan-metrics").num_columns(6).striped(true).show(ui, |ui| {
-                        for h in ["Канал", "OK", "Ошибки", "Таймауты", "Исключения", "Реконнекты"] {
-                            ui.label(RichText::new(h).strong());
-                        }
-                        ui.end_row();
-                        for (name, m) in &metrics {
-                            let s = m.snapshot();
-                            ui.label(name);
-                            ui.label(s.reqs_ok.to_string());
-                            ui.label(s.reqs_err.to_string());
-                            ui.label(s.timeouts.to_string());
-                            ui.label(s.exceptions.to_string());
-                            ui.label(s.reconnects.to_string());
+                    egui::Grid::new("chan-metrics")
+                        .num_columns(6)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for h in [
+                                "Канал",
+                                "OK",
+                                "Ошибки",
+                                "Таймауты",
+                                "Исключения",
+                                "Реконнекты",
+                            ] {
+                                ui.label(RichText::new(h).strong());
+                            }
                             ui.end_row();
+                            for (name, m) in &metrics {
+                                let s = m.snapshot();
+                                ui.label(name);
+                                ui.label(s.reqs_ok.to_string());
+                                ui.label(s.reqs_err.to_string());
+                                ui.label(s.timeouts.to_string());
+                                ui.label(s.exceptions.to_string());
+                                ui.label(s.reconnects.to_string());
+                                ui.end_row();
+                            }
+                        });
+                    for (name, m) in &metrics {
+                        if let Some(error) = &*m.last_error.read() {
+                            ui.colored_label(Color32::RED, format!("{name}: {error}"));
                         }
-                    });
+                    }
                 }
                 // Живые значения тегов.
                 let snaps = {
@@ -547,31 +854,42 @@ impl ConfigApp {
                 if !snaps.is_empty() {
                     ui.separator();
                     ui.label(RichText::new(format!("Теги ({})", snaps.len())).strong());
-                    egui::ScrollArea::vertical().max_height(260.0).id_salt("tags").show(ui, |ui| {
-                        egui::Grid::new("tag-values").num_columns(5).striped(true).show(ui, |ui| {
-                            for h in ["Тег", "Значение", "Качество", "Возраст", "График"] {
-                                ui.label(RichText::new(h).strong());
-                            }
-                            ui.end_row();
-                            let now = Instant::now();
-                            for (name, s) in &snaps {
-                                ui.label(name);
-                                ui.monospace(format!("{}", s.value));
-                                ui.label(quality_label(s.quality));
-                                let age = now.saturating_duration_since(s.mono).as_millis();
-                                ui.label(format!("{age} мс"));
-                                // График доступен только для числовых тегов.
-                                if s.value.as_f64().is_some() {
-                                    if ui.button("📈").on_hover_text("Открыть график").clicked() {
-                                        open_chart = Some(name.clone());
+                    egui::ScrollArea::vertical()
+                        .max_height(260.0)
+                        .id_salt("tags")
+                        .show(ui, |ui| {
+                            egui::Grid::new("tag-values")
+                                .num_columns(5)
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    for h in ["Тег", "Значение", "Качество", "Возраст", "График"]
+                                    {
+                                        ui.label(RichText::new(h).strong());
                                     }
-                                } else {
-                                    ui.label("—");
-                                }
-                                ui.end_row();
-                            }
+                                    ui.end_row();
+                                    let now = Instant::now();
+                                    for (name, s) in &snaps {
+                                        ui.label(name);
+                                        ui.monospace(format!("{}", s.value));
+                                        ui.label(quality_label(s.quality));
+                                        let age = now.saturating_duration_since(s.mono).as_millis();
+                                        ui.label(format!("{age} мс"));
+                                        // График доступен только для числовых тегов.
+                                        if s.value.as_f64().is_some() {
+                                            if ui
+                                                .button("📈")
+                                                .on_hover_text("Открыть график")
+                                                .clicked()
+                                            {
+                                                open_chart = Some(name.clone());
+                                            }
+                                        } else {
+                                            ui.label("—");
+                                        }
+                                        ui.end_row();
+                                    }
+                                });
                         });
-                    });
                 }
             }
         }
@@ -579,12 +897,19 @@ impl ConfigApp {
         // Лог сервера.
         ui.separator();
         ui.label(RichText::new("Журнал").strong());
-        egui::ScrollArea::vertical().max_height(200.0).id_salt("log").stick_to_bottom(true).show(ui, |ui| {
-            let lines = self.logs.lock();
-            for line in lines.iter() {
-                ui.label(RichText::new(line).monospace().small());
-            }
-        });
+        egui::ScrollArea::vertical()
+            .max_height(200.0)
+            .id_salt("log")
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                let lines: Vec<String> = self
+                    .server
+                    .remote_logs()
+                    .unwrap_or_else(|| self.logs.lock().iter().cloned().collect());
+                for line in lines.iter() {
+                    ui.label(RichText::new(line).monospace().small());
+                }
+            });
 
         if let Some(tag) = open_chart {
             self.open_chart(tag);
@@ -612,7 +937,8 @@ impl ConfigApp {
             .flat_map(|d| d.registers.iter())
             .find(|r| r.tag == tag)
             .and_then(|r| r.units.clone());
-        self.charts.push(crate::history::ChartWindow::new(tag, units));
+        self.charts
+            .push(crate::history::ChartWindow::new(tag, units));
     }
 
     /// Записать текущие значения наблюдаемых (открытых в графиках) тегов.
@@ -652,6 +978,12 @@ impl ConfigApp {
 
     /// Собрать конфиг из текущего состояния и запустить стек.
     fn start_server(&mut self) {
+        if self.dirty || self.path.is_none() {
+            self.save(false);
+            if self.dirty || self.path.is_none() {
+                return;
+            }
+        }
         // Сохранённый и не грязный — грузим с диска (сработает перебазирование
         // относительных путей на каталог конфига, B7). Иначе — из памяти.
         let resolved = if let (Some(path), false) = (&self.path, self.dirty) {
@@ -660,15 +992,18 @@ impl ConfigApp {
             serde_json::to_string(&ConfigFile::V1(self.cfg.clone()))
                 .map_err(|e| e.to_string())
                 .and_then(|json| match &self.path {
-                    Some(path) => gateway_config::load_str_at(&json, path).map_err(|e| e.to_string()),
+                    Some(path) => {
+                        gateway_config::load_str_at(&json, path).map_err(|e| e.to_string())
+                    }
                     None => gateway_config::load_str(&json).map_err(|e| e.to_string()),
                 })
         };
         match resolved {
             Ok(cfg) => {
-                self.server.watch_file(self.path.clone());
+                self.server
+                    .watch_file(if self.dirty { None } else { self.path.clone() });
                 self.server.start(cfg);
-            },
+            }
             Err(e) => self.server.last_error = Some(format!("конфиг: {e}")),
         }
     }
@@ -679,41 +1014,51 @@ impl ConfigApp {
         ui.heading("Сервер OPC UA");
         let o = &mut self.cfg.opcua;
         let before = format!("{o:?}");
-        egui::Grid::new("opcua").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-            ui.label("Включён");
-            ui.checkbox(&mut o.enabled, "");
-            ui.end_row();
-            ui.label("Адрес привязки (host)");
-            ui.text_edit_singleline(&mut o.host);
-            ui.end_row();
-            ui.label("Рекламируемый адрес");
-            opt_string_edit(ui, &mut o.advertised_host, "имя/IP для клиентов (если host=0.0.0.0)");
-            ui.end_row();
-            ui.label("Порт");
-            ui.add(egui::DragValue::new(&mut o.port));
-            ui.end_row();
-            ui.label("Имя приложения");
-            ui.text_edit_singleline(&mut o.application_name);
-            ui.end_row();
-            ui.label("URI приложения");
-            ui.text_edit_singleline(&mut o.application_uri);
-            ui.end_row();
-            ui.label("Эндпоинт без шифрования");
-            ui.checkbox(&mut o.allow_none_security, "для наладки/изолированных сетей");
-            ui.end_row();
-            ui.label("Basic256Sha256 + Aes256");
-            ui.checkbox(&mut o.basic256sha256, "шифрованные эндпоинты");
-            ui.end_row();
-            ui.label("Анонимный доступ");
-            ui.checkbox(&mut o.allow_anonymous, "");
-            ui.end_row();
-            ui.label("Каталог PKI");
-            ui.text_edit_singleline(&mut o.pki_dir);
-            ui.end_row();
-            ui.label("Доверять любым сертификатам");
-            ui.checkbox(&mut o.trust_any_client_cert, "ТОЛЬКО на время пусконаладки");
-            ui.end_row();
-        });
+        egui::Grid::new("opcua")
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Включён");
+                ui.checkbox(&mut o.enabled, "");
+                ui.end_row();
+                ui.label("Адрес привязки (host)");
+                ui.text_edit_singleline(&mut o.host);
+                ui.end_row();
+                ui.label("Рекламируемый адрес");
+                opt_string_edit(
+                    ui,
+                    &mut o.advertised_host,
+                    "имя/IP для клиентов (если host=0.0.0.0)",
+                );
+                ui.end_row();
+                ui.label("Порт");
+                ui.add(egui::DragValue::new(&mut o.port));
+                ui.end_row();
+                ui.label("Имя приложения");
+                ui.text_edit_singleline(&mut o.application_name);
+                ui.end_row();
+                ui.label("URI приложения");
+                ui.text_edit_singleline(&mut o.application_uri);
+                ui.end_row();
+                ui.label("Эндпоинт без шифрования");
+                ui.checkbox(
+                    &mut o.allow_none_security,
+                    "для наладки/изолированных сетей",
+                );
+                ui.end_row();
+                ui.label("Basic256Sha256 + Aes256");
+                ui.checkbox(&mut o.basic256sha256, "шифрованные эндпоинты");
+                ui.end_row();
+                ui.label("Анонимный доступ");
+                ui.checkbox(&mut o.allow_anonymous, "");
+                ui.end_row();
+                ui.label("Каталог PKI");
+                ui.text_edit_singleline(&mut o.pki_dir);
+                ui.end_row();
+                ui.label("Доверять любым сертификатам");
+                ui.checkbox(&mut o.trust_any_client_cert, "ТОЛЬКО на время пусконаладки");
+                ui.end_row();
+            });
 
         ui.separator();
         ui.horizontal(|ui| {
@@ -730,42 +1075,47 @@ impl ConfigApp {
         let mut open_hash: Option<usize> = None;
         for (i, u) in o.users.iter_mut().enumerate() {
             ui.group(|ui| {
-                egui::Grid::new(("user", i)).num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
-                    ui.label("Логин");
-                    ui.text_edit_singleline(&mut u.username);
-                    ui.end_row();
-                    let mut hashed = u.password_hash.is_some();
-                    ui.label("Хранение пароля");
-                    ui.horizontal(|ui| {
-                        if ui.radio_value(&mut hashed, false, "открытый (наладка)").changed()
-                            || ui.radio_value(&mut hashed, true, "хэш argon2id").changed()
-                        {
-                            if hashed {
-                                u.password = None;
-                                u.password_hash = Some(String::new());
-                            } else {
-                                u.password = Some(String::new());
-                                u.password_hash = None;
-                            }
-                        }
-                    });
-                    ui.end_row();
-                    if let Some(p) = &mut u.password {
-                        ui.label("Пароль");
-                        ui.text_edit_singleline(p);
+                egui::Grid::new(("user", i))
+                    .num_columns(2)
+                    .spacing([12.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Логин");
+                        ui.text_edit_singleline(&mut u.username);
                         ui.end_row();
-                    }
-                    if let Some(h) = &mut u.password_hash {
-                        ui.label("password_hash");
+                        let mut hashed = u.password_hash.is_some();
+                        ui.label("Хранение пароля");
                         ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(h).desired_width(360.0));
-                            if ui.button("Сгенерировать…").clicked() {
-                                open_hash = Some(i);
+                            if ui
+                                .radio_value(&mut hashed, false, "открытый (наладка)")
+                                .changed()
+                                || ui.radio_value(&mut hashed, true, "хэш argon2id").changed()
+                            {
+                                if hashed {
+                                    u.password = None;
+                                    u.password_hash = Some(String::new());
+                                } else {
+                                    u.password = Some(String::new());
+                                    u.password_hash = None;
+                                }
                             }
                         });
                         ui.end_row();
-                    }
-                });
+                        if let Some(p) = &mut u.password {
+                            ui.label("Пароль");
+                            ui.text_edit_singleline(p);
+                            ui.end_row();
+                        }
+                        if let Some(h) = &mut u.password_hash {
+                            ui.label("password_hash");
+                            ui.horizontal(|ui| {
+                                ui.add(egui::TextEdit::singleline(h).desired_width(360.0));
+                                if ui.button("Сгенерировать…").clicked() {
+                                    open_hash = Some(i);
+                                }
+                            });
+                            ui.end_row();
+                        }
+                    });
                 if ui.button("Удалить пользователя").clicked() {
                     remove = Some(i);
                 }
@@ -775,7 +1125,10 @@ impl ConfigApp {
             o.users.remove(i);
         }
         if let Some(i) = open_hash {
-            self.hash_dialog = Some(HashDialog { user_idx: i, ..Default::default() });
+            self.hash_dialog = Some(HashDialog {
+                user_idx: i,
+                ..Default::default()
+            });
         }
         if before != format!("{:?}", self.cfg.opcua) {
             self.dirty = true;
@@ -784,31 +1137,41 @@ impl ConfigApp {
 
     fn ui_general(&mut self, ui: &mut egui::Ui) {
         ui.heading("Общие");
-        let before = (format!("{:?}", self.cfg.gateway), format!("{:?}", self.cfg.logging));
-        egui::Grid::new("gateway").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-            ui.label("Имя экземпляра");
-            ui.text_edit_singleline(&mut self.cfg.gateway.instance_name);
-            ui.end_row();
-            ui.label("Каталог данных (retentive)");
-            ui.text_edit_singleline(&mut self.cfg.gateway.data_dir);
-            ui.end_row();
-        });
+        let before = (
+            format!("{:?}", self.cfg.gateway),
+            format!("{:?}", self.cfg.logging),
+            format!("{:?}", self.cfg.mcp),
+        );
+        egui::Grid::new("gateway")
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Имя экземпляра");
+                ui.text_edit_singleline(&mut self.cfg.gateway.instance_name);
+                ui.end_row();
+                ui.label("Каталог данных (retentive)");
+                ui.text_edit_singleline(&mut self.cfg.gateway.data_dir);
+                ui.end_row();
+            });
         ui.label("Retry по умолчанию (шлюз):");
         retry_edit(ui, "gw-retry", &mut self.cfg.gateway.default_retry);
 
         ui.separator();
         ui.heading("Логи");
-        egui::Grid::new("logging").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-            ui.label("Фильтр (level)");
-            ui.text_edit_singleline(&mut self.cfg.logging.level);
-            ui.end_row();
-            ui.label("Каталог файлов логов");
-            opt_string_edit(ui, &mut self.cfg.logging.dir, "(пусто — только консоль)");
-            ui.end_row();
-            ui.label("Префикс файла");
-            ui.text_edit_singleline(&mut self.cfg.logging.file_prefix);
-            ui.end_row();
-        });
+        egui::Grid::new("logging")
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Фильтр (level)");
+                ui.text_edit_singleline(&mut self.cfg.logging.level);
+                ui.end_row();
+                ui.label("Каталог файлов логов");
+                opt_string_edit(ui, &mut self.cfg.logging.dir, "(пусто — только консоль)");
+                ui.end_row();
+                ui.label("Префикс файла");
+                ui.text_edit_singleline(&mut self.cfg.logging.file_prefix);
+                ui.end_row();
+            });
         ui.label(
             RichText::new(
                 "Подсказка: \"info,modbus_traffic=debug\" + флаг «дамп трафика» на канале — \
@@ -816,7 +1179,27 @@ impl ConfigApp {
             )
             .weak(),
         );
-        if before != (format!("{:?}", self.cfg.gateway), format!("{:?}", self.cfg.logging)) {
+        ui.separator();
+        ui.heading("MCP — управление через Codex / Claude");
+        ui.checkbox(&mut self.cfg.mcp.enabled, "Включить локальный HTTP MCP");
+        egui::Grid::new("mcp-settings")
+            .num_columns(2)
+            .show(ui, |ui| {
+                ui.label("Адрес (только loopback)");
+                ui.text_edit_singleline(&mut self.cfg.mcp.host);
+                ui.end_row();
+                ui.label("Порт (0 — свободный)");
+                ui.add(egui::DragValue::new(&mut self.cfg.mcp.port).range(0..=65535));
+                ui.end_row();
+            });
+        ui.label(RichText::new("Сохраните конфигурацию перед запуском. Изменение адреса MCP действует после закрытия и повторного открытия контроллера.").weak());
+        if before
+            != (
+                format!("{:?}", self.cfg.gateway),
+                format!("{:?}", self.cfg.logging),
+                format!("{:?}", self.cfg.mcp),
+            )
+        {
             self.dirty = true;
         }
     }
@@ -835,28 +1218,35 @@ impl ConfigApp {
             }
         });
         let mut remove = None;
-        egui::Grid::new("pg").num_columns(4).spacing([12.0, 4.0]).striped(true).show(ui, |ui| {
-            ui.label(RichText::new("Имя").strong());
-            ui.label(RichText::new("Период, мс").strong());
-            ui.label(RichText::new("Приоритет").strong());
-            ui.label("");
-            ui.end_row();
-            for (i, g) in self.cfg.poll_groups.iter_mut().enumerate() {
-                if ui.text_edit_singleline(&mut g.id).changed() {
-                    self.dirty = true;
-                }
-                if ui.add(egui::DragValue::new(&mut g.period_ms).range(1..=3_600_000)).changed() {
-                    self.dirty = true;
-                }
-                if ui.add(egui::DragValue::new(&mut g.priority)).changed() {
-                    self.dirty = true;
-                }
-                if ui.button("Удалить").clicked() {
-                    remove = Some(i);
-                }
+        egui::Grid::new("pg")
+            .num_columns(4)
+            .spacing([12.0, 4.0])
+            .striped(true)
+            .show(ui, |ui| {
+                ui.label(RichText::new("Имя").strong());
+                ui.label(RichText::new("Период, мс").strong());
+                ui.label(RichText::new("Приоритет").strong());
+                ui.label("");
                 ui.end_row();
-            }
-        });
+                for (i, g) in self.cfg.poll_groups.iter_mut().enumerate() {
+                    if ui.text_edit_singleline(&mut g.id).changed() {
+                        self.dirty = true;
+                    }
+                    if ui
+                        .add(egui::DragValue::new(&mut g.period_ms).range(1..=3_600_000))
+                        .changed()
+                    {
+                        self.dirty = true;
+                    }
+                    if ui.add(egui::DragValue::new(&mut g.priority)).changed() {
+                        self.dirty = true;
+                    }
+                    if ui.button("Удалить").clicked() {
+                        remove = Some(i);
+                    }
+                    ui.end_row();
+                }
+            });
         if let Some(i) = remove {
             self.cfg.poll_groups.remove(i);
             self.dirty = true;
@@ -878,32 +1268,35 @@ impl ConfigApp {
                 ch.devices.push(new_device(&format!("device-{n}"), n as u8));
             }
         });
-        egui::Grid::new(("ch", ci)).num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-            ui.label("Имя (id)");
-            ui.text_edit_singleline(&mut ch.id);
-            ui.end_row();
-            ui.label("Включён");
-            ui.checkbox(&mut ch.enabled, "");
-            ui.end_row();
-            ui.label("Транспорт");
-            transport_edit(ui, ci, &mut ch.transport, &ports, &mut refresh_ports);
-            ui.end_row();
-            ui.label("Таймаут запроса, мс");
-            ui.add(egui::DragValue::new(&mut ch.request_timeout_ms).range(50..=60_000));
-            ui.end_row();
-            ui.label("Пауза между запросами, мс");
-            ui.add(egui::DragValue::new(&mut ch.inter_request_delay_ms).range(0..=1000));
-            ui.end_row();
-            ui.label("Слияние дыр адресов (max_gap)");
-            ui.add(egui::DragValue::new(&mut ch.max_gap).range(0..=125));
-            ui.end_row();
-            ui.label("Оффлайн после N отказов");
-            ui.add(egui::DragValue::new(&mut ch.offline_after_failures).range(1..=100));
-            ui.end_row();
-            ui.label("Дамп трафика (hex)");
-            ui.checkbox(&mut ch.log_traffic, "target modbus_traffic (debug)");
-            ui.end_row();
-        });
+        egui::Grid::new(("ch", ci))
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Имя (id)");
+                ui.text_edit_singleline(&mut ch.id);
+                ui.end_row();
+                ui.label("Включён");
+                ui.checkbox(&mut ch.enabled, "");
+                ui.end_row();
+                ui.label("Транспорт");
+                transport_edit(ui, ci, &mut ch.transport, &ports, &mut refresh_ports);
+                ui.end_row();
+                ui.label("Таймаут запроса, мс");
+                ui.add(egui::DragValue::new(&mut ch.request_timeout_ms).range(50..=60_000));
+                ui.end_row();
+                ui.label("Пауза между запросами, мс");
+                ui.add(egui::DragValue::new(&mut ch.inter_request_delay_ms).range(0..=1000));
+                ui.end_row();
+                ui.label("Слияние дыр адресов (max_gap)");
+                ui.add(egui::DragValue::new(&mut ch.max_gap).range(0..=125));
+                ui.end_row();
+                ui.label("Оффлайн после N отказов");
+                ui.add(egui::DragValue::new(&mut ch.offline_after_failures).range(1..=100));
+                ui.end_row();
+                ui.label("Дамп трафика (hex)");
+                ui.checkbox(&mut ch.log_traffic, "target modbus_traffic (debug)");
+                ui.end_row();
+            });
         ui.label("Retry канала (переопределяет шлюз):");
         opt_retry_edit(ui, ("ch-retry", ci), &mut ch.retry);
 
@@ -928,11 +1321,21 @@ impl ConfigApp {
         let poll_groups: Vec<PollGroupConfig> = self.cfg.poll_groups.clone();
         let group_names: Vec<String> = poll_groups.iter().map(|g| g.id.clone()).collect();
         let transport = self.cfg.channels.get(ci).map(|c| c.transport.clone());
-        let ch_timeout = self.cfg.channels.get(ci).map(|c| c.request_timeout_ms).unwrap_or(1000);
+        let ch_timeout = self
+            .cfg
+            .channels
+            .get(ci)
+            .map(|c| c.request_timeout_ms)
+            .unwrap_or(1000);
         // Сводка опроса (F4): сколько запросов Modbus даёт устройство после коалесинга.
         let txn_summary = self.device_txn_count(ci, di);
 
-        let Some(dev) = self.cfg.channels.get_mut(ci).and_then(|c| c.devices.get_mut(di)) else {
+        let Some(dev) = self
+            .cfg
+            .channels
+            .get_mut(ci)
+            .and_then(|c| c.devices.get_mut(di))
+        else {
             ui.label("Устройство удалено");
             return;
         };
@@ -952,26 +1355,29 @@ impl ConfigApp {
                 }
             }
         });
-        egui::Grid::new(("dev", ci, di)).num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-            ui.label("Имя (id)");
-            ui.text_edit_singleline(&mut dev.id);
-            ui.end_row();
-            ui.label("Адрес Modbus (unit id)");
-            ui.add(egui::DragValue::new(&mut dev.unit_id).range(0..=247));
-            ui.end_row();
-            ui.label("Включено");
-            ui.checkbox(&mut dev.enabled, "");
-            ui.end_row();
-            ui.label("Таймаут, мс (переопр.)");
-            opt_num_edit_u64(ui, &mut dev.request_timeout_ms, 50..=60_000);
-            ui.end_row();
-            ui.label("Оффлайн после N (переопр.)");
-            opt_num_edit_u32(ui, &mut dev.offline_after_failures, 1..=100);
-            ui.end_row();
-            ui.label("max_gap (переопр.)");
-            opt_num_edit_u16(ui, &mut dev.max_gap, 0..=125);
-            ui.end_row();
-        });
+        egui::Grid::new(("dev", ci, di))
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Имя (id)");
+                ui.text_edit_singleline(&mut dev.id);
+                ui.end_row();
+                ui.label("Адрес Modbus (unit id)");
+                ui.add(egui::DragValue::new(&mut dev.unit_id).range(0..=247));
+                ui.end_row();
+                ui.label("Включено");
+                ui.checkbox(&mut dev.enabled, "");
+                ui.end_row();
+                ui.label("Таймаут, мс (переопр.)");
+                opt_num_edit_u64(ui, &mut dev.request_timeout_ms, 50..=60_000);
+                ui.end_row();
+                ui.label("Оффлайн после N (переопр.)");
+                opt_num_edit_u32(ui, &mut dev.offline_after_failures, 1..=100);
+                ui.end_row();
+                ui.label("max_gap (переопр.)");
+                opt_num_edit_u16(ui, &mut dev.max_gap, 0..=125);
+                ui.end_row();
+            });
         // B8: retry устройства.
         ui.label("Retry устройства (переопределяет канал):");
         opt_retry_edit(ui, ("dev-retry", ci, di), &mut dev.retry);
@@ -979,8 +1385,15 @@ impl ConfigApp {
         // F4: наглядность опроса.
         ui.separator();
         let summary = match txn_summary {
-            Some(m) => format!("Опрос: {} тегов → {} запросов Modbus (после слияния)", dev.registers.len(), m),
-            None => format!("Опрос: {} тегов → — (исправьте ошибки конфигурации)", dev.registers.len()),
+            Some(m) => format!(
+                "Опрос: {} тегов → {} запросов Modbus (после слияния)",
+                dev.registers.len(),
+                m
+            ),
+            None => format!(
+                "Опрос: {} тегов → — (исправьте ошибки конфигурации)",
+                dev.registers.len()
+            ),
         };
         ui.label(RichText::new(summary).strong());
 
@@ -996,28 +1409,37 @@ impl ConfigApp {
             }
         });
 
-        let period_of = |name: &str| poll_groups.iter().find(|g| g.id == name).map(|g| g.period_ms);
-        egui::Grid::new(("regs", ci, di)).num_columns(5).striped(true).spacing([10.0, 3.0]).show(ui, |ui| {
-            for h in ["Тег", "Функция", "Адрес", "Тип", "Группа"] {
-                ui.label(RichText::new(h).strong());
-            }
-            ui.end_row();
-            for (i, r) in dev.registers.iter().enumerate() {
-                let selected = self.selected_register == Some(i);
-                if ui.selectable_label(selected, &r.tag).clicked() {
-                    self.selected_register = Some(i);
+        let period_of = |name: &str| {
+            poll_groups
+                .iter()
+                .find(|g| g.id == name)
+                .map(|g| g.period_ms)
+        };
+        egui::Grid::new(("regs", ci, di))
+            .num_columns(5)
+            .striped(true)
+            .spacing([10.0, 3.0])
+            .show(ui, |ui| {
+                for h in ["Тег", "Функция", "Адрес", "Тип", "Группа"] {
+                    ui.label(RichText::new(h).strong());
                 }
-                ui.label(function_label(r.function));
-                ui.label(fmt_addr(r.address, self.addr_hex));
-                ui.label(format!("{:?}", r.data_type).to_lowercase());
-                let grp = match period_of(&r.poll_group) {
-                    Some(p) => format!("{} ({} мс)", r.poll_group, p),
-                    None => format!("{} (?)", r.poll_group),
-                };
-                ui.label(grp);
                 ui.end_row();
-            }
-        });
+                for (i, r) in dev.registers.iter().enumerate() {
+                    let selected = self.selected_register == Some(i);
+                    if ui.selectable_label(selected, &r.tag).clicked() {
+                        self.selected_register = Some(i);
+                    }
+                    ui.label(function_label(r.function));
+                    ui.label(fmt_addr(r.address, self.addr_hex));
+                    ui.label(format!("{:?}", r.data_type).to_lowercase());
+                    let grp = match period_of(&r.poll_group) {
+                        Some(p) => format!("{} ({} мс)", r.poll_group, p),
+                        None => format!("{} (?)", r.poll_group),
+                    };
+                    ui.label(grp);
+                    ui.end_row();
+                }
+            });
 
         let mut duplicate: Option<usize> = None;
         if let Some(i) = self.selected_register {
@@ -1046,7 +1468,10 @@ impl ConfigApp {
             .button(RichText::new("Удалить устройство").color(Color32::RED))
             .clicked();
         let changed = before
-            != format!("{:?}", self.cfg.channels.get(ci).and_then(|c| c.devices.get(di)));
+            != format!(
+                "{:?}",
+                self.cfg.channels.get(ci).and_then(|c| c.devices.get(di))
+            );
         if delete_dev {
             self.cfg.channels[ci].devices.remove(di);
             self.section = Section::Channel(ci);
@@ -1073,7 +1498,9 @@ impl ConfigApp {
     // ---------- диалоги ----------
 
     fn hash_dialog_window(&mut self, ctx: &egui::Context) {
-        let Some(dlg) = &mut self.hash_dialog else { return };
+        let Some(dlg) = &mut self.hash_dialog else {
+            return;
+        };
         let mut open = true;
         let mut apply = false;
         egui::Window::new("Хэш пароля (argon2id)")
@@ -1125,11 +1552,13 @@ impl ConfigApp {
                         }
                     });
                 }
-                egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
-                    for line in &tp.lines {
-                        ui.label(RichText::new(line).monospace());
-                    }
-                });
+                egui::ScrollArea::vertical()
+                    .max_height(300.0)
+                    .show(ui, |ui| {
+                        for line in &tp.lines {
+                            ui.label(RichText::new(line).monospace());
+                        }
+                    });
             });
         if cancel {
             tp.cancel();
@@ -1172,90 +1601,123 @@ fn register_form(
     }
     let multiword = matches!(
         r.data_type,
-        DataType::U32 | DataType::I32 | DataType::U64 | DataType::I64 | DataType::F32 | DataType::F64
+        DataType::U32
+            | DataType::I32
+            | DataType::U64
+            | DataType::I64
+            | DataType::F32
+            | DataType::F64
     );
     let numeric = !matches!(r.data_type, DataType::Ascii);
     let bit_selectable = matches!(r.data_type, DataType::Bit | DataType::Bitfield);
 
     // --- Источник данных ---
     ui.label(RichText::new("Источник данных").strong().underline());
-    egui::Grid::new(("src", id)).num_columns(2).spacing([12.0, 5.0]).show(ui, |ui| {
-        ui.label("Имя тега");
-        ui.text_edit_singleline(&mut r.tag);
-        ui.end_row();
+    egui::Grid::new(("src", id))
+        .num_columns(2)
+        .spacing([12.0, 5.0])
+        .show(ui, |ui| {
+            ui.label("Имя тега");
+            ui.text_edit_singleline(&mut r.tag);
+            ui.end_row();
 
-        ui.label("Группа опроса");
-        egui::ComboBox::from_id_salt(("pg", id))
-            .selected_text(&r.poll_group)
-            .show_ui(ui, |ui| {
-                for g in poll_groups {
-                    ui.selectable_value(&mut r.poll_group, g.clone(), g);
-                }
-            });
-        ui.end_row();
-
-        ui.label("Функция Modbus");
-        function_combo(ui, id, &mut r.function);
-        ui.end_row();
-
-        ui.label("Адрес");
-        address_edit(ui, &mut r.address, addr_hex);
-        ui.end_row();
-
-        if !is_coil && !is_custom {
-            ui.label("Тип данных");
-            egui::ComboBox::from_id_salt(("dt", id))
-                .selected_text(format!("{:?}", r.data_type).to_lowercase())
+            ui.label("Группа опроса");
+            egui::ComboBox::from_id_salt(("pg", id))
+                .selected_text(&r.poll_group)
                 .show_ui(ui, |ui| {
-                    for dt in [
-                        DataType::U16, DataType::I16, DataType::U32, DataType::I32, DataType::U64,
-                        DataType::I64, DataType::F32, DataType::F64, DataType::Bcd, DataType::Ascii,
-                        DataType::Bitfield, DataType::Bit,
-                    ] {
-                        ui.selectable_value(&mut r.data_type, dt, format!("{dt:?}").to_lowercase());
+                    for g in poll_groups {
+                        ui.selectable_value(&mut r.poll_group, g.clone(), g);
                     }
                 });
             ui.end_row();
-        }
 
-        if is_register && multiword {
-            ui.label("Порядок слов");
-            egui::ComboBox::from_id_salt(("wo", id))
-                .selected_text(word_order_label(r.word_order))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut r.word_order, WordOrder::BigEndian, "старшее слово первым");
-                    ui.selectable_value(&mut r.word_order, WordOrder::LittleEndian, "младшее слово первым (swap)");
-                });
+            ui.label("Функция Modbus");
+            function_combo(ui, id, &mut r.function);
             ui.end_row();
-            ui.label("Порядок байт в слове");
-            egui::ComboBox::from_id_salt(("bo", id))
-                .selected_text(byte_order_label(r.byte_order))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut r.byte_order, ByteOrder::BigEndian, "стандартный");
-                    ui.selectable_value(&mut r.byte_order, ByteOrder::LittleEndian, "переставлены");
-                });
-            ui.end_row();
-        }
 
-        if is_register && matches!(r.data_type, DataType::Ascii | DataType::Bcd) {
-            ui.label("Длина, регистров");
-            opt_num_edit_u16(ui, &mut r.length, 1..=125);
+            ui.label("Адрес");
+            address_edit(ui, &mut r.address, addr_hex);
             ui.end_row();
-        }
-        if is_register && bit_selectable {
-            ui.label("Бит в регистре (0..15)");
-            opt_num_edit_u8(ui, &mut r.bit, 0..=15);
-            ui.end_row();
-        }
-        if is_custom {
-            ui.label("Тело запроса (hex)");
-            opt_string_edit(ui, &mut r.custom_request, "напр. 01 a0 ff");
-            ui.end_row();
-            ui.label("Ответ, байт");
-            opt_num_edit_u16(ui, &mut r.custom_response_len, 1..=250);
-            ui.end_row();
-        }
-    });
+
+            if !is_coil && !is_custom {
+                ui.label("Тип данных");
+                egui::ComboBox::from_id_salt(("dt", id))
+                    .selected_text(format!("{:?}", r.data_type).to_lowercase())
+                    .show_ui(ui, |ui| {
+                        for dt in [
+                            DataType::U16,
+                            DataType::I16,
+                            DataType::U32,
+                            DataType::I32,
+                            DataType::U64,
+                            DataType::I64,
+                            DataType::F32,
+                            DataType::F64,
+                            DataType::Bcd,
+                            DataType::Ascii,
+                            DataType::Bitfield,
+                            DataType::Bit,
+                        ] {
+                            ui.selectable_value(
+                                &mut r.data_type,
+                                dt,
+                                format!("{dt:?}").to_lowercase(),
+                            );
+                        }
+                    });
+                ui.end_row();
+            }
+
+            if is_register && multiword {
+                ui.label("Порядок слов");
+                egui::ComboBox::from_id_salt(("wo", id))
+                    .selected_text(word_order_label(r.word_order))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut r.word_order,
+                            WordOrder::BigEndian,
+                            "старшее слово первым",
+                        );
+                        ui.selectable_value(
+                            &mut r.word_order,
+                            WordOrder::LittleEndian,
+                            "младшее слово первым (swap)",
+                        );
+                    });
+                ui.end_row();
+                ui.label("Порядок байт в слове");
+                egui::ComboBox::from_id_salt(("bo", id))
+                    .selected_text(byte_order_label(r.byte_order))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut r.byte_order, ByteOrder::BigEndian, "стандартный");
+                        ui.selectable_value(
+                            &mut r.byte_order,
+                            ByteOrder::LittleEndian,
+                            "переставлены",
+                        );
+                    });
+                ui.end_row();
+            }
+
+            if is_register && matches!(r.data_type, DataType::Ascii | DataType::Bcd) {
+                ui.label("Длина, регистров");
+                opt_num_edit_u16(ui, &mut r.length, 1..=125);
+                ui.end_row();
+            }
+            if is_register && bit_selectable {
+                ui.label("Бит в регистре (0..15)");
+                opt_num_edit_u8(ui, &mut r.bit, 0..=15);
+                ui.end_row();
+            }
+            if is_custom {
+                ui.label("Тело запроса (hex)");
+                opt_string_edit(ui, &mut r.custom_request, "напр. 01 a0 ff");
+                ui.end_row();
+                ui.label("Ответ, байт");
+                opt_num_edit_u16(ui, &mut r.custom_response_len, 1..=250);
+                ui.end_row();
+            }
+        });
 
     // Информация о занимаемых регистрах (F2).
     if let Some(span) = register_span(r) {
@@ -1274,68 +1736,79 @@ fn register_form(
     if !is_custom && numeric && !is_coil {
         ui.add_space(6.0);
         ui.label(RichText::new("Преобразование").strong().underline());
-        egui::Grid::new(("xform", id)).num_columns(2).spacing([12.0, 5.0]).show(ui, |ui| {
-            ui.label("Масштаб (scale)");
-            ui.add(egui::DragValue::new(&mut r.scale).speed(0.01));
-            ui.end_row();
-            ui.label("Смещение (offset)");
-            ui.add(egui::DragValue::new(&mut r.offset).speed(0.01));
-            ui.end_row();
-            ui.label("Формула (raw, tag(\"...\"))");
-            opt_string_edit(ui, &mut r.formula, "(пусто — линейная scale/offset)");
-            ui.end_row();
-            ui.label("Deadband");
-            opt_num_edit_f64(ui, &mut r.deadband);
-            ui.end_row();
-            ui.label("Ед. изм. (units)");
-            opt_string_edit(ui, &mut r.units, "");
-            ui.end_row();
-        });
+        egui::Grid::new(("xform", id))
+            .num_columns(2)
+            .spacing([12.0, 5.0])
+            .show(ui, |ui| {
+                ui.label("Масштаб (scale)");
+                ui.add(egui::DragValue::new(&mut r.scale).speed(0.01));
+                ui.end_row();
+                ui.label("Смещение (offset)");
+                ui.add(egui::DragValue::new(&mut r.offset).speed(0.01));
+                ui.end_row();
+                ui.label("Формула (raw, tag(\"...\"))");
+                opt_string_edit(ui, &mut r.formula, "(пусто — линейная scale/offset)");
+                ui.end_row();
+                ui.label("Deadband");
+                opt_num_edit_f64(ui, &mut r.deadband);
+                ui.end_row();
+                ui.label("Ед. изм. (units)");
+                opt_string_edit(ui, &mut r.units, "");
+                ui.end_row();
+            });
         formula_help(ui, id);
     } else if is_custom {
         ui.add_space(6.0);
         ui.label(
-            RichText::new("Vendor-функция: данные публикуются как байты (ByteString), без преобразования.")
-                .weak(),
+            RichText::new(
+                "Vendor-функция: данные публикуются как байты (ByteString), без преобразования.",
+            )
+            .weak(),
         );
     }
 
     // --- Хранение ---
     ui.add_space(6.0);
     ui.label(RichText::new("Хранение").strong().underline());
-    egui::Grid::new(("store", id)).num_columns(2).spacing([12.0, 5.0]).show(ui, |ui| {
-        ui.label("Retentive (переживает рестарт)");
-        ui.checkbox(&mut r.retentive, "");
-        ui.end_row();
-        ui.label("История, последних N");
-        opt_num_edit_u16(ui, &mut r.retain_last, 1..=1000);
-        ui.end_row();
-    });
+    egui::Grid::new(("store", id))
+        .num_columns(2)
+        .spacing([12.0, 5.0])
+        .show(ui, |ui| {
+            ui.label("Retentive (переживает рестарт)");
+            ui.checkbox(&mut r.retentive, "");
+            ui.end_row();
+            ui.label("История, последних N");
+            opt_num_edit_u16(ui, &mut r.retain_last, 1..=1000);
+            ui.end_row();
+        });
 
     // --- Запись (только holding/coils) ---
     if is_register || matches!(r.function, FunctionCode::ReadCoils) {
         ui.add_space(6.0);
         ui.label(RichText::new("Запись").strong().underline());
         let coil_src = matches!(r.function, FunctionCode::ReadCoils);
-        egui::Grid::new(("write", id)).num_columns(2).spacing([12.0, 5.0]).show(ui, |ui| {
-            ui.label("Запись из OPC UA");
-            ui.checkbox(&mut r.writable, "writable");
-            ui.end_row();
-            // Функция записи видна всегда (для holding/coil), но активна только
-            // при включённой записи — чтобы выбор FC05/06/15/16 был очевиден.
-            if coil_src || matches!(r.function, FunctionCode::ReadHoldingRegisters) {
-                ui.label("Функция записи");
-                ui.add_enabled_ui(r.writable, |ui| {
-                    write_function_combo(ui, id, &mut r.write_function, coil_src);
-                });
+        egui::Grid::new(("write", id))
+            .num_columns(2)
+            .spacing([12.0, 5.0])
+            .show(ui, |ui| {
+                ui.label("Запись из OPC UA");
+                ui.checkbox(&mut r.writable, "writable");
                 ui.end_row();
-            }
-            if r.writable && r.formula.is_some() {
-                ui.label("Обратная формула (value)");
-                opt_string_edit(ui, &mut r.write_formula, "обязательна при formula");
-                ui.end_row();
-            }
-        });
+                // Функция записи видна всегда (для holding/coil), но активна только
+                // при включённой записи — чтобы выбор FC05/06/15/16 был очевиден.
+                if coil_src || matches!(r.function, FunctionCode::ReadHoldingRegisters) {
+                    ui.label("Функция записи");
+                    ui.add_enabled_ui(r.writable, |ui| {
+                        write_function_combo(ui, id, &mut r.write_function, coil_src);
+                    });
+                    ui.end_row();
+                }
+                if r.writable && r.formula.is_some() {
+                    ui.label("Обратная формула (value)");
+                    opt_string_edit(ui, &mut r.write_formula, "обязательна при formula");
+                    ui.end_row();
+                }
+            });
         if coil_src {
             ui.label(
                 RichText::new(
@@ -1362,7 +1835,10 @@ fn register_form(
         if ui.button("Дублировать тег").clicked() {
             action = RegAction::Duplicate;
         }
-        if ui.button(RichText::new("Удалить тег").color(Color32::RED)).clicked() {
+        if ui
+            .button(RichText::new("Удалить тег").color(Color32::RED))
+            .clicked()
+        {
             action = RegAction::Delete;
         }
     });
@@ -1393,102 +1869,166 @@ fn transport_edit(
             TransportConfig::Rtu { .. } => "Modbus RTU (COM)",
             TransportConfig::RtuOverTcp { .. } => "RTU поверх TCP",
         };
-        egui::ComboBox::from_id_salt(("tr", ci)).selected_text(current).show_ui(ui, |ui| {
-            if ui.selectable_label(matches!(t, TransportConfig::Tcp { .. }), "Modbus TCP").clicked() {
-                *t = TransportConfig::Tcp { host: "192.168.0.10".into(), port: 502, connect_timeout_ms: 5000 };
-            }
-            if ui.selectable_label(matches!(t, TransportConfig::Rtu { .. }), "Modbus RTU (COM)").clicked() {
-                *t = TransportConfig::Rtu { path: default_serial_path(), baud: 9600, data_bits: 8, parity: Parity::None, stop_bits: 1 };
-            }
-            if ui.selectable_label(matches!(t, TransportConfig::RtuOverTcp { .. }), "RTU поверх TCP").clicked() {
-                *t = TransportConfig::RtuOverTcp { host: "192.168.0.20".into(), port: 4001, connect_timeout_ms: 5000 };
-            }
-        });
+        egui::ComboBox::from_id_salt(("tr", ci))
+            .selected_text(current)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(matches!(t, TransportConfig::Tcp { .. }), "Modbus TCP")
+                    .clicked()
+                {
+                    *t = TransportConfig::Tcp {
+                        host: "192.168.0.10".into(),
+                        port: 502,
+                        connect_timeout_ms: 5000,
+                    };
+                }
+                if ui
+                    .selectable_label(matches!(t, TransportConfig::Rtu { .. }), "Modbus RTU (COM)")
+                    .clicked()
+                {
+                    *t = TransportConfig::Rtu {
+                        path: default_serial_path(),
+                        baud: 9600,
+                        data_bits: 8,
+                        parity: Parity::None,
+                        stop_bits: 1,
+                    };
+                }
+                if ui
+                    .selectable_label(
+                        matches!(t, TransportConfig::RtuOverTcp { .. }),
+                        "RTU поверх TCP",
+                    )
+                    .clicked()
+                {
+                    *t = TransportConfig::RtuOverTcp {
+                        host: "192.168.0.20".into(),
+                        port: 4001,
+                        connect_timeout_ms: 5000,
+                    };
+                }
+            });
         match t {
-            TransportConfig::Tcp { host, port, connect_timeout_ms }
-            | TransportConfig::RtuOverTcp { host, port, connect_timeout_ms } => {
-                egui::Grid::new(("tr-tcp", ci)).num_columns(2).show(ui, |ui| {
-                    ui.label("Хост");
-                    ui.text_edit_singleline(host);
-                    ui.end_row();
-                    ui.label("Порт");
-                    ui.add(egui::DragValue::new(port));
-                    ui.end_row();
-                    ui.label("Таймаут подключения, мс");
-                    ui.add(egui::DragValue::new(connect_timeout_ms).range(100..=60_000));
-                    ui.end_row();
-                });
+            TransportConfig::Tcp {
+                host,
+                port,
+                connect_timeout_ms,
             }
-            TransportConfig::Rtu { path, baud, data_bits, parity, stop_bits } => {
-                egui::Grid::new(("tr-rtu", ci)).num_columns(2).show(ui, |ui| {
-                    ui.label("Порт");
-                    ui.horizontal(|ui| {
-                        // F1: список обнаруженных портов + ручной ввод.
-                        egui::ComboBox::from_id_salt(("com", ci))
-                            .selected_text(if path.is_empty() { "выбрать…" } else { path.as_str() })
+            | TransportConfig::RtuOverTcp {
+                host,
+                port,
+                connect_timeout_ms,
+            } => {
+                egui::Grid::new(("tr-tcp", ci))
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        ui.label("Хост");
+                        ui.text_edit_singleline(host);
+                        ui.end_row();
+                        ui.label("Порт");
+                        ui.add(egui::DragValue::new(port));
+                        ui.end_row();
+                        ui.label("Таймаут подключения, мс");
+                        ui.add(egui::DragValue::new(connect_timeout_ms).range(100..=60_000));
+                        ui.end_row();
+                    });
+            }
+            TransportConfig::Rtu {
+                path,
+                baud,
+                data_bits,
+                parity,
+                stop_bits,
+            } => {
+                egui::Grid::new(("tr-rtu", ci))
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        ui.label("Порт");
+                        ui.horizontal(|ui| {
+                            // F1: список обнаруженных портов + ручной ввод.
+                            egui::ComboBox::from_id_salt(("com", ci))
+                                .selected_text(if path.is_empty() {
+                                    "выбрать…"
+                                } else {
+                                    path.as_str()
+                                })
+                                .show_ui(ui, |ui| {
+                                    if ports.is_empty() {
+                                        ui.label(RichText::new("порты не найдены").weak());
+                                    }
+                                    for p in ports {
+                                        ui.selectable_value(path, p.clone(), p);
+                                    }
+                                });
+                            if ui
+                                .button("⟳")
+                                .on_hover_text("Обновить список портов")
+                                .clicked()
+                            {
+                                *refresh = true;
+                            }
+                            ui.add(
+                                egui::TextEdit::singleline(path)
+                                    .desired_width(120.0)
+                                    .hint_text("COM3 / /dev/ttyUSB0"),
+                            );
+                        });
+                        ui.end_row();
+                        ui.label("Скорость (baud)");
+                        egui::ComboBox::from_id_salt(("baud", ci))
+                            .selected_text(baud.to_string())
                             .show_ui(ui, |ui| {
-                                if ports.is_empty() {
-                                    ui.label(RichText::new("порты не найдены").weak());
-                                }
-                                for p in ports {
-                                    ui.selectable_value(path, p.clone(), p);
+                                for b in [1200u32, 2400, 4800, 9600, 19200, 38400, 57600, 115200] {
+                                    ui.selectable_value(baud, b, b.to_string());
                                 }
                             });
-                        if ui.button("⟳").on_hover_text("Обновить список портов").clicked() {
-                            *refresh = true;
-                        }
-                        ui.add(egui::TextEdit::singleline(path).desired_width(120.0).hint_text("COM3 / /dev/ttyUSB0"));
+                        ui.end_row();
+                        ui.label("Биты данных");
+                        ui.add(egui::DragValue::new(data_bits).range(5..=8));
+                        ui.end_row();
+                        ui.label("Чётность");
+                        egui::ComboBox::from_id_salt(("par", ci))
+                            .selected_text(match parity {
+                                Parity::None => "нет",
+                                Parity::Even => "чёт",
+                                Parity::Odd => "нечёт",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(parity, Parity::None, "нет");
+                                ui.selectable_value(parity, Parity::Even, "чёт");
+                                ui.selectable_value(parity, Parity::Odd, "нечёт");
+                            });
+                        ui.end_row();
+                        ui.label("Стоп-биты");
+                        ui.add(egui::DragValue::new(stop_bits).range(1..=2));
+                        ui.end_row();
                     });
-                    ui.end_row();
-                    ui.label("Скорость (baud)");
-                    egui::ComboBox::from_id_salt(("baud", ci))
-                        .selected_text(baud.to_string())
-                        .show_ui(ui, |ui| {
-                            for b in [1200u32, 2400, 4800, 9600, 19200, 38400, 57600, 115200] {
-                                ui.selectable_value(baud, b, b.to_string());
-                            }
-                        });
-                    ui.end_row();
-                    ui.label("Биты данных");
-                    ui.add(egui::DragValue::new(data_bits).range(5..=8));
-                    ui.end_row();
-                    ui.label("Чётность");
-                    egui::ComboBox::from_id_salt(("par", ci))
-                        .selected_text(match parity {
-                            Parity::None => "нет",
-                            Parity::Even => "чёт",
-                            Parity::Odd => "нечёт",
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(parity, Parity::None, "нет");
-                            ui.selectable_value(parity, Parity::Even, "чёт");
-                            ui.selectable_value(parity, Parity::Odd, "нечёт");
-                        });
-                    ui.end_row();
-                    ui.label("Стоп-биты");
-                    ui.add(egui::DragValue::new(stop_bits).range(1..=2));
-                    ui.end_row();
-                });
             }
         }
     });
 }
 
 fn function_combo(ui: &mut egui::Ui, id: (usize, usize, usize), f: &mut FunctionCode) {
-    egui::ComboBox::from_id_salt(("fc", id)).selected_text(function_label(*f)).show_ui(ui, |ui| {
-        for (fc, label) in [
-            (FunctionCode::ReadCoils, "01 катушки (coils)"),
-            (FunctionCode::ReadDiscreteInputs, "02 дискр. входы"),
-            (FunctionCode::ReadHoldingRegisters, "03 holding-регистры"),
-            (FunctionCode::ReadInputRegisters, "04 input-регистры"),
-        ] {
-            ui.selectable_value(f, fc, label);
-        }
-        let is_custom = matches!(f, FunctionCode::Custom { .. });
-        if ui.selectable_label(is_custom, "произвольная (custom)").clicked() && !is_custom {
-            *f = FunctionCode::Custom { code: 0x41 };
-        }
-    });
+    egui::ComboBox::from_id_salt(("fc", id))
+        .selected_text(function_label(*f))
+        .show_ui(ui, |ui| {
+            for (fc, label) in [
+                (FunctionCode::ReadCoils, "01 катушки (coils)"),
+                (FunctionCode::ReadDiscreteInputs, "02 дискр. входы"),
+                (FunctionCode::ReadHoldingRegisters, "03 holding-регистры"),
+                (FunctionCode::ReadInputRegisters, "04 input-регистры"),
+            ] {
+                ui.selectable_value(f, fc, label);
+            }
+            let is_custom = matches!(f, FunctionCode::Custom { .. });
+            if ui
+                .selectable_label(is_custom, "произвольная (custom)")
+                .clicked()
+                && !is_custom
+            {
+                *f = FunctionCode::Custom { code: 0x41 };
+            }
+        });
     if let FunctionCode::Custom { code } = f {
         ui.horizontal(|ui| {
             ui.label("код:");
@@ -1515,28 +2055,42 @@ fn write_function_combo(
         Some(FunctionCode::WriteMultipleRegisters) => "16 неск. регистров",
         Some(_) => "?",
     };
-    egui::ComboBox::from_id_salt(("wf", id)).selected_text(label).show_ui(ui, |ui| {
-        ui.selectable_value(wf, None, if is_coil { "Авто (05)" } else { "Авто (06/16)" });
-        if is_coil {
-            ui.selectable_value(wf, Some(FunctionCode::WriteSingleCoil), "05 write_single_coil");
+    egui::ComboBox::from_id_salt(("wf", id))
+        .selected_text(label)
+        .show_ui(ui, |ui| {
             ui.selectable_value(
                 wf,
-                Some(FunctionCode::WriteMultipleCoils),
-                "15 write_multiple_coils",
+                None,
+                if is_coil {
+                    "Авто (05)"
+                } else {
+                    "Авто (06/16)"
+                },
             );
-        } else {
-            ui.selectable_value(
-                wf,
-                Some(FunctionCode::WriteSingleRegister),
-                "06 write_single_register",
-            );
-            ui.selectable_value(
-                wf,
-                Some(FunctionCode::WriteMultipleRegisters),
-                "16 write_multiple_registers",
-            );
-        }
-    });
+            if is_coil {
+                ui.selectable_value(
+                    wf,
+                    Some(FunctionCode::WriteSingleCoil),
+                    "05 write_single_coil",
+                );
+                ui.selectable_value(
+                    wf,
+                    Some(FunctionCode::WriteMultipleCoils),
+                    "15 write_multiple_coils",
+                );
+            } else {
+                ui.selectable_value(
+                    wf,
+                    Some(FunctionCode::WriteSingleRegister),
+                    "06 write_single_register",
+                );
+                ui.selectable_value(
+                    wf,
+                    Some(FunctionCode::WriteMultipleRegisters),
+                    "16 write_multiple_registers",
+                );
+            }
+        });
 }
 
 /// Раскрывающаяся справка по синтаксису формул (evalexpr).
@@ -1619,7 +2173,9 @@ fn function_label(f: FunctionCode) -> String {
 fn quality_label(q: mb_poller::Quality) -> RichText {
     match q {
         mb_poller::Quality::Good => RichText::new("Good").color(Color32::from_rgb(0, 160, 0)),
-        mb_poller::Quality::Uncertain => RichText::new("Uncertain").color(Color32::from_rgb(200, 140, 0)),
+        mb_poller::Quality::Uncertain => {
+            RichText::new("Uncertain").color(Color32::from_rgb(200, 140, 0))
+        }
         mb_poller::Quality::Bad => RichText::new("Bad").color(Color32::RED),
     }
 }
@@ -1655,7 +2211,11 @@ fn opt_retry_edit(ui: &mut egui::Ui, id: impl std::hash::Hash + Copy, r: &mut Op
     let mut set = r.is_some();
     ui.horizontal(|ui| {
         if ui.checkbox(&mut set, "переопределить").changed() {
-            *r = if set { Some(RetryConfig::default()) } else { None };
+            *r = if set {
+                Some(RetryConfig::default())
+            } else {
+                None
+            };
         }
     });
     if let Some(rc) = r {
@@ -1665,9 +2225,17 @@ fn opt_retry_edit(ui: &mut egui::Ui, id: impl std::hash::Hash + Copy, r: &mut Op
 
 fn opt_string_edit(ui: &mut egui::Ui, v: &mut Option<String>, hint: &str) {
     let mut buf = v.clone().unwrap_or_default();
-    let resp = ui.add(egui::TextEdit::singleline(&mut buf).hint_text(hint).desired_width(320.0));
+    let resp = ui.add(
+        egui::TextEdit::singleline(&mut buf)
+            .hint_text(hint)
+            .desired_width(320.0),
+    );
     if resp.changed() {
-        *v = if buf.trim().is_empty() { None } else { Some(buf) };
+        *v = if buf.trim().is_empty() {
+            None
+        } else {
+            Some(buf)
+        };
     }
 }
 
@@ -1708,14 +2276,22 @@ fn opt_num_edit_f64(ui: &mut egui::Ui, v: &mut Option<f64>) {
 }
 
 fn default_serial_path() -> String {
-    if cfg!(windows) { "COM3".into() } else { "/dev/ttyUSB0".into() }
+    if cfg!(windows) {
+        "COM3".into()
+    } else {
+        "/dev/ttyUSB0".into()
+    }
 }
 
 fn new_channel(id: &str) -> ChannelConfig {
     ChannelConfig {
         id: id.into(),
         enabled: true,
-        transport: TransportConfig::Tcp { host: "192.168.0.10".into(), port: 502, connect_timeout_ms: 5000 },
+        transport: TransportConfig::Tcp {
+            host: "192.168.0.10".into(),
+            port: 502,
+            connect_timeout_ms: 5000,
+        },
         request_timeout_ms: 1000,
         inter_request_delay_ms: 0,
         max_inflight: 1,
@@ -1765,4 +2341,3 @@ fn new_register(tag: &str, poll_group: String) -> RegisterEntry {
         write_function: None,
     }
 }
-

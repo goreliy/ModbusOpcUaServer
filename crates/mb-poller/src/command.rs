@@ -15,6 +15,9 @@ use mb_types::DeviceId;
 use tokio::sync::oneshot;
 
 pub struct WriteCommand {
+    /// Read-only diagnostics share the owning channel's queue. They may probe
+    /// an unconfigured slave but can never issue a write or vendor function.
+    pub diagnostic: Option<DiagnosticTarget>,
     /// Target device identity (#14: keyed by [`DeviceId`], not a positional
     /// index — the plan's device vec is enabled-filtered, so a raw index is a
     /// wrong-actuator hazard). The channel task resolves it against its plan
@@ -28,4 +31,9 @@ pub struct WriteCommand {
     /// submitter stops waiting at the SAME instant, so a write whose client
     /// already received a timeout can never fire late (double-actuation).
     pub deadline: Instant,
+}
+
+pub struct DiagnosticTarget {
+    pub unit: u8,
+    pub timeout: std::time::Duration,
 }

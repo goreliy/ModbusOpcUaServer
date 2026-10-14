@@ -8,6 +8,7 @@
 
 mod app;
 mod history;
+mod remote;
 mod server;
 mod testpoll;
 

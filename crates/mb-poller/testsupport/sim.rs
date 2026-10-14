@@ -76,9 +76,7 @@ pub fn spawn_server(listener: TcpListener, banks: Banks) -> JoinHandle<()> {
         let service = MultiSlave { banks };
         let on_connected = move |stream, socket_addr| {
             let service = service.clone();
-            async move {
-                accept_tcp_connection(stream, socket_addr, move |_| Ok(Some(service.clone())))
-            }
+            async move { accept_tcp_connection(stream, socket_addr, move |_| Ok(Some(service.clone()))) }
         };
         let _ = server
             .serve(&on_connected, |err| eprintln!("server error: {err}"))

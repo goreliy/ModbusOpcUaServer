@@ -6,14 +6,38 @@ use tokio_modbus::prelude::Request;
 
 #[derive(Debug, Clone)]
 pub enum ModbusRequest {
-    ReadCoils { addr: u16, qty: u16 },
-    ReadDiscreteInputs { addr: u16, qty: u16 },
-    ReadHoldingRegisters { addr: u16, qty: u16 },
-    ReadInputRegisters { addr: u16, qty: u16 },
-    WriteSingleCoil { addr: u16, value: bool },
-    WriteSingleRegister { addr: u16, value: u16 },
-    WriteMultipleCoils { addr: u16, values: Vec<bool> },
-    WriteMultipleRegisters { addr: u16, values: Vec<u16> },
+    ReadCoils {
+        addr: u16,
+        qty: u16,
+    },
+    ReadDiscreteInputs {
+        addr: u16,
+        qty: u16,
+    },
+    ReadHoldingRegisters {
+        addr: u16,
+        qty: u16,
+    },
+    ReadInputRegisters {
+        addr: u16,
+        qty: u16,
+    },
+    WriteSingleCoil {
+        addr: u16,
+        value: bool,
+    },
+    WriteSingleRegister {
+        addr: u16,
+        value: u16,
+    },
+    WriteMultipleCoils {
+        addr: u16,
+        values: Vec<bool>,
+    },
+    WriteMultipleRegisters {
+        addr: u16,
+        values: Vec<u16>,
+    },
     /// Vendor/raw PDU. `expect_len` = expected response byte count — required by
     /// the poller for Custom reads on stream transports (RTU / RTU-over-TCP),
     /// where the byte stream cannot self-delimit vendor frames (design §3.2).
@@ -40,7 +64,9 @@ impl ModbusRequest {
             Self::ReadHoldingRegisters { addr, qty } => Request::ReadHoldingRegisters(*addr, *qty),
             Self::ReadInputRegisters { addr, qty } => Request::ReadInputRegisters(*addr, *qty),
             Self::WriteSingleCoil { addr, value } => Request::WriteSingleCoil(*addr, *value),
-            Self::WriteSingleRegister { addr, value } => Request::WriteSingleRegister(*addr, *value),
+            Self::WriteSingleRegister { addr, value } => {
+                Request::WriteSingleRegister(*addr, *value)
+            }
             Self::WriteMultipleCoils { addr, values } => {
                 Request::WriteMultipleCoils(*addr, Cow::Owned(values.clone()))
             }
